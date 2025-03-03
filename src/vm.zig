@@ -21,7 +21,7 @@ pub const VM = struct {
             .debug = debug,
             .stack = ArrayList(Value).init(allocator),
             .allocator = allocator,
-            .chunk = undefined,
+            .chunk = Chunk.init(allocator),
             .ptr = undefined,
         };
     }
@@ -47,7 +47,10 @@ pub const VM = struct {
         return self.chunk.constants.items[self.readByte()];
     }
 
-    fn run(self: *Self) !void {
+    fn run(self: *Self, source: []const u8) !void {
+        var compiler = try Compiler.init(source, &self.chunk);
+        try compiler.run();
+        compiler.deinit();
         while (true) {
             if (self.debug) {
                 print("          ", .{});
@@ -95,7 +98,7 @@ pub const VM = struct {
             print("> ", .{});
             const source = try reader.readUntilDelimiterAlloc(self.allocator, '\n', 1 << 20);
             defer self.allocator.free(source);
-            // try self.run(source);
+            try self.run(source);
         }
     }
 
@@ -104,11 +107,12 @@ pub const VM = struct {
         defer self.allocator.free(realpath);
         const file = try std.fs.openFileAbsolute(realpath, .{});
         defer file.close();
-        _ = try file.readToEndAlloc(self.allocator, 1 << 20);
-        // try self.run(source);
+        const source = try file.readToEndAlloc(self.allocator, 1 << 20);
+        try self.run(source);
     }
 
     pub fn deinit(self: *Self) void {
         self.stack.deinit();
+        self.chunk.deinit();
     }
 };

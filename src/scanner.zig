@@ -64,8 +64,8 @@ pub const Scanner = struct {
     source: []const u8,
     identifiers: StringHashMap(TokenKind),
 
-    pub fn init(source: []const u8, allocator: Allocator) !Self {
-        var i = StringHashMap(TokenKind).init(allocator);
+    pub fn init(source: []const u8) !Self {
+        var i = StringHashMap(TokenKind).init(std.heap.page_allocator);
         try i.put("and", .@"and");
         try i.put("class", .class);
         try i.put("else", .@"else");
@@ -82,6 +82,7 @@ pub const Scanner = struct {
         try i.put("true", .true);
         try i.put("var", .@"var");
         try i.put("while", .@"while");
+
         return Self{
             .line = 1,
             .start = 0,
@@ -223,7 +224,7 @@ pub const Scanner = struct {
         }
     }
 
-    pub fn scan(self: *Self) !Token {
+    pub fn token(self: *Self) !Token {
         self.skipWhitespace();
         self.start = self.current;
         if (self.isAtEnd()) {

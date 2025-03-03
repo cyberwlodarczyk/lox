@@ -2,6 +2,9 @@ const std = @import("std");
 const print = std.debug.print;
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
+const EnumArray = std.enums.EnumArray;
+const Token = @import("scanner.zig").Token;
+const TokenKind = @import("scanner.zig").TokenKind;
 const Scanner = @import("scanner.zig").Scanner;
 
 pub const Operation = enum(u8) {
@@ -23,7 +26,7 @@ pub const Chunk = struct {
     constants: ArrayList(Value),
     lines: ArrayList(u32),
 
-    fn init(allocator: Allocator) Self {
+    pub fn init(allocator: Allocator) Self {
         return Chunk{
             .code = ArrayList(u8).init(allocator),
             .constants = ArrayList(Value).init(allocator),
@@ -87,7 +90,7 @@ pub const Chunk = struct {
         return offset + 2;
     }
 
-    fn deinit(self: *Chunk) void {
+    pub fn deinit(self: *Chunk) void {
         self.code.deinit();
         self.constants.deinit();
         self.lines.deinit();
@@ -96,15 +99,141 @@ pub const Chunk = struct {
 
 pub const Compiler = struct {
     const Self = @This();
+    const Precedence = enum(u8) {
+        none,
+        assignment,
+        @"or",
+        @"and",
+        equality,
+        comparison,
+        term,
+        factor,
+        unary,
+        call,
+        primary,
+    };
+    const ParseFn = *const fn (self: *Self) anyerror!void;
+    const ParseRule = struct {
+        prefix: ?ParseFn = null,
+        infix: ?ParseFn = null,
+        precedence: Precedence = .none,
+    };
+    pub const Error = error{
+        MissingExpressionRightParen,
+        MissingExpression,
+        MissingExpressionEnd,
+        TooManyConstants,
+    };
 
     scanner: Scanner,
-    allocator: Allocator,
+    current: Token,
+    previous: Token,
+    chunk: *Chunk,
+    rules: EnumArray(TokenKind, ParseRule),
 
-    pub fn init(source: []const u8, allocator: Allocator) !Self {
+    pub fn init(source: []const u8, chunk: *Chunk) !Self {
         return Self{
-            .scanner = try Scanner.init(source, allocator),
-            .allocator = allocator,
+            .scanner = try Scanner.init(source),
+            .current = undefined,
+            .previous = undefined,
+            .chunk = chunk,
+            .rules = EnumArray(TokenKind, ParseRule).initDefault(.{}, .{
+                .left_paren = .{ .prefix = grouping },
+                .minus = .{ .prefix = unary, .infix = binary, .precedence = .term },
+                .plus = .{ .infix = binary, .precedence = .term },
+                .slash = .{ .infix = binary, .precedence = .factor },
+                .star = .{ .infix = binary, .precedence = .factor },
+                .number = .{ .prefix = number },
+            }),
         };
+    }
+
+    fn advance(self: *Self) !void {
+        self.previous = self.current;
+        self.current = try self.scanner.token();
+    }
+
+    fn consume(self: *Self, kind: TokenKind, @"error": Error) !void {
+        if (self.current.kind == kind) {
+            try self.advance();
+        } else {
+            return @"error";
+        }
+    }
+
+    fn emit(self: *Self, byte: u8) !void {
+        try self.chunk.write(byte, self.previous.line);
+    }
+
+    fn emitOperation(self: *Self, operation: Operation) !void {
+        try self.emit(@intFromEnum(operation));
+    }
+
+    fn emitConstant(self: *Self, value: Value) !void {
+        if (self.chunk.constants.items.len == std.math.maxInt(u8) + 1) {
+            return Error.TooManyConstants;
+        }
+        try self.chunk.constants.append(value);
+        try self.emitOperation(.constant);
+        try self.emit(@intCast(self.chunk.constants.items.len - 1));
+    }
+
+    fn parsePrecedence(self: *Self, precedence: Precedence) !void {
+        try self.advance();
+        const rule = self.rules.get(self.previous.kind);
+        const prefix = rule.prefix orelse return Error.MissingExpression;
+        try prefix(self);
+        while (@intFromEnum(precedence) <= @intFromEnum(self.rules.get(self.current.kind).precedence)) {
+            try self.advance();
+            const infix = self.rules.get(self.previous.kind).infix.?;
+            try infix(self);
+        }
+    }
+
+    fn expression(self: *Self) !void {
+        try self.parsePrecedence(.assignment);
+    }
+
+    fn number(self: *Self) !void {
+        const value = try std.fmt.parseFloat(f64, self.previous.lexeme);
+        try self.emitConstant(value);
+    }
+
+    fn unary(self: *Self) !void {
+        const kind = self.previous.kind;
+        try self.parsePrecedence(.unary);
+        switch (kind) {
+            .minus => {
+                try self.emitOperation(.negate);
+            },
+            else => {},
+        }
+    }
+
+    fn binary(self: *Self) !void {
+        const kind = self.previous.kind;
+        const rule = self.rules.get(kind);
+        try self.parsePrecedence(@enumFromInt(@intFromEnum(rule.precedence) + 1));
+        const operation: ?Operation = switch (kind) {
+            .plus => .add,
+            .minus => .subtract,
+            .star => .multiply,
+            .slash => .divide,
+            else => null,
+        };
+        try self.emitOperation(operation.?);
+    }
+
+    fn grouping(self: *Self) !void {
+        try self.expression();
+        try self.consume(.right_paren, Error.MissingExpressionRightParen);
+    }
+
+    pub fn run(self: *Self) !void {
+        try self.advance();
+        try self.expression();
+        try self.consume(.eof, Error.MissingExpressionEnd);
+        try self.emitOperation(.@"return");
     }
 
     pub fn deinit(self: *Self) void {
