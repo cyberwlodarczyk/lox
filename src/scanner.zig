@@ -18,7 +18,7 @@ pub const TokenKind = enum {
     bang_equal,
     equal,
     equal_equal,
-    grater,
+    greater,
     greater_equal,
     less,
     less_equal,
@@ -280,7 +280,7 @@ pub const Scanner = struct {
                 if (self.match('=')) {
                     break :x .greater_equal;
                 } else {
-                    break :x .grater;
+                    break :x .greater;
                 }
             },
             else => null,

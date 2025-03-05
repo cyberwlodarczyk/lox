@@ -9,15 +9,70 @@ const Scanner = @import("scanner.zig").Scanner;
 
 pub const Operation = enum(u8) {
     constant,
+    nil,
+    true,
+    false,
+    equal,
+    greater,
+    less,
     add,
     subtract,
     multiply,
     divide,
+    not,
     negate,
     @"return",
 };
 
-pub const Value = f64;
+pub const Value = union(enum) {
+    const Self = @This();
+    const Tag = std.meta.Tag(Self);
+
+    bool: bool,
+    nil,
+    number: f64,
+
+    pub fn debug(self: Self) void {
+        switch (self) {
+            .bool => |x| {
+                if (x) {
+                    print("true", .{});
+                } else {
+                    print("false", .{});
+                }
+            },
+            .nil => {
+                print("nil", .{});
+            },
+            .number => |x| {
+                print("{d}", .{x});
+            },
+        }
+    }
+
+    pub fn is(self: Self, tag: Tag) bool {
+        return @as(Tag, self) == tag;
+    }
+
+    pub fn eql(self: Self, other: Value) bool {
+        if (@as(Tag, self) != @as(Tag, other)) {
+            return false;
+        }
+        return switch (self) {
+            .bool => |x| x == other.bool,
+            .nil => true,
+            .number => |x| x == other.number,
+        };
+    }
+
+    pub fn isFalsy(self: Self) bool {
+        return switch (self) {
+            .bool => |x| !x,
+            .nil => true,
+            .number => false,
+        };
+    }
+};
 
 pub const Chunk = struct {
     const Self = @This();
@@ -60,10 +115,17 @@ pub const Chunk = struct {
         const operation: Operation = @enumFromInt(self.code.items[offset]);
         return switch (operation) {
             .constant => self.constantInstruction("constant", offset),
+            .nil => simpleInstruction("nil", offset),
+            .true => simpleInstruction("true", offset),
+            .false => simpleInstruction("false", offset),
+            .equal => simpleInstruction("equal", offset),
+            .greater => simpleInstruction("greater", offset),
+            .less => simpleInstruction("less", offset),
             .add => simpleInstruction("add", offset),
             .subtract => simpleInstruction("subtract", offset),
             .multiply => simpleInstruction("multiply", offset),
             .divide => simpleInstruction("divide", offset),
+            .not => simpleInstruction("not", offset),
             .negate => simpleInstruction("negate", offset),
             .@"return" => simpleInstruction("return", offset),
         };
@@ -77,10 +139,9 @@ pub const Chunk = struct {
     fn constantInstruction(self: Chunk, name: []const u8, offset: usize) usize {
         const constant = self.code.items[offset + 1];
         const value = self.constants.items[constant];
-        print(
-            "{s: <16} {d:>4} '{d}'\n",
-            .{ name, constant, value },
-        );
+        print("{s: <16} {d:>4} '\n", .{ name, constant });
+        value.debug();
+        print("'\n", .{});
         return offset + 2;
     }
 
@@ -139,6 +200,16 @@ pub const Compiler = struct {
                 .slash = .{ .infix = binary, .precedence = .factor },
                 .star = .{ .infix = binary, .precedence = .factor },
                 .number = .{ .prefix = number },
+                .nil = .{ .prefix = literal },
+                .true = .{ .prefix = literal },
+                .false = .{ .prefix = literal },
+                .bang = .{ .prefix = unary },
+                .bang_equal = .{ .infix = binary, .precedence = .equality },
+                .equal_equal = .{ .infix = binary, .precedence = .equality },
+                .greater_equal = .{ .infix = binary, .precedence = .comparison },
+                .greater = .{ .infix = binary, .precedence = .comparison },
+                .less_equal = .{ .infix = binary, .precedence = .comparison },
+                .less = .{ .infix = binary, .precedence = .comparison },
             }),
         };
     }
@@ -191,32 +262,51 @@ pub const Compiler = struct {
 
     fn number(self: *Self) !void {
         const value = try std.fmt.parseFloat(f64, self.previous.lexeme);
-        try self.emitConstant(value);
+        try self.emitConstant(.{ .number = value });
     }
 
     fn unary(self: *Self) !void {
         const kind = self.previous.kind;
         try self.parsePrecedence(.unary);
-        switch (kind) {
-            .minus => {
-                try self.emitOperation(.negate);
-            },
-            else => {},
-        }
+        try self.emitOperation(switch (kind) {
+            .bang => .not,
+            .minus => .negate,
+            else => unreachable,
+        });
     }
 
     fn binary(self: *Self) !void {
         const kind = self.previous.kind;
         const rule = self.rules.get(kind);
         try self.parsePrecedence(@enumFromInt(@intFromEnum(rule.precedence) + 1));
-        const operation: ?Operation = switch (kind) {
+        try self.emitOperation(switch (kind) {
             .plus => .add,
             .minus => .subtract,
             .star => .multiply,
             .slash => .divide,
-            else => null,
-        };
-        try self.emitOperation(operation.?);
+            .bang_equal => .equal,
+            .equal_equal => .equal,
+            .greater => .greater,
+            .greater_equal => .less,
+            .less => .less,
+            .less_equal => .greater,
+            else => unreachable,
+        });
+        switch (kind) {
+            .bang_equal, .greater_equal, .less_equal => {
+                try self.emitOperation(.not);
+            },
+            else => {},
+        }
+    }
+
+    fn literal(self: *Self) !void {
+        try self.emitOperation(switch (self.previous.kind) {
+            .false => .false,
+            .nil => .nil,
+            .true => .true,
+            else => unreachable,
+        });
     }
 
     fn grouping(self: *Self) !void {

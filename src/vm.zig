@@ -9,6 +9,10 @@ const Chunk = @import("compiler.zig").Chunk;
 pub const VM = struct {
     const Self = @This();
     const Stack = std.ArrayList(Value);
+    pub const Error = error{
+        ExpectedNumberOperand,
+        ExpectedNumberOperands,
+    };
 
     debug: bool,
     stack: Stack,
@@ -22,6 +26,10 @@ pub const VM = struct {
             .chunk = chunk,
             .ptr = chunk.code.items.ptr,
         };
+    }
+
+    fn peek(self: *Self, delta: usize) Value {
+        return self.stack.items[self.stack.items.len - 1 - delta];
     }
 
     fn push(self: *Self, value: Value) !void {
@@ -45,26 +53,45 @@ pub const VM = struct {
         return self.chunk.constants.items[self.readByte()];
     }
 
-    fn add(a: f64, b: f64) f64 {
-        return a + b;
+    fn add(a: Value, b: Value) Value {
+        return .{ .number = a.number + b.number };
     }
 
-    fn subtract(a: f64, b: f64) f64 {
-        return a - b;
+    fn subtract(a: Value, b: Value) Value {
+        return .{ .number = a.number - b.number };
     }
 
-    fn multiply(a: f64, b: f64) f64 {
-        return a * b;
+    fn multiply(a: Value, b: Value) Value {
+        return .{ .number = a.number * b.number };
     }
 
-    fn divide(a: f64, b: f64) f64 {
-        return a / b;
+    fn divide(a: Value, b: Value) Value {
+        return .{ .number = a.number / b.number };
     }
 
-    fn binary(self: *Self, f: *const fn (a: f64, b: f64) f64) !void {
+    fn equal(a: Value, b: Value) Value {
+        return .{ .bool = a.eql(b) };
+    }
+
+    fn greater(a: Value, b: Value) Value {
+        return .{ .bool = a.number > b.number };
+    }
+
+    fn less(a: Value, b: Value) Value {
+        return .{ .bool = a.number < b.number };
+    }
+
+    fn binary(self: *Self, f: *const fn (a: Value, b: Value) Value) !void {
         const b = self.pop();
         const a = self.pop();
         try self.push(f(a, b));
+    }
+
+    fn numeric(self: *Self, f: *const fn (a: Value, b: Value) Value) !void {
+        if (!self.peek(0).is(.number) or !self.peek(1).is(.number)) {
+            return Error.ExpectedNumberOperands;
+        }
+        return self.binary(f);
     }
 
     pub fn run(self: *Self) !void {
@@ -72,7 +99,9 @@ pub const VM = struct {
             if (self.debug) {
                 print("          ", .{});
                 for (self.stack.items) |value| {
-                    print("[ {d} ]", .{value});
+                    print("[ ", .{});
+                    value.debug();
+                    print(" ]", .{});
                 }
                 print("\n", .{});
                 _ = self.chunk.disassembleInstruction(@intFromPtr(
@@ -86,23 +115,49 @@ pub const VM = struct {
                 .constant => {
                     try self.push(self.readConstant());
                 },
+                .nil => {
+                    try self.push(.nil);
+                },
+                .true => {
+                    try self.push(.{ .bool = true });
+                },
+                .false => {
+                    try self.push(.{ .bool = false });
+                },
+                .equal => {
+                    try self.binary(equal);
+                },
+                .greater => {
+                    try self.numeric(greater);
+                },
+                .less => {
+                    try self.numeric(less);
+                },
                 .add => {
-                    try self.binary(add);
+                    try self.numeric(add);
                 },
                 .subtract => {
-                    try self.binary(subtract);
+                    try self.numeric(subtract);
                 },
                 .multiply => {
-                    try self.binary(multiply);
+                    try self.numeric(multiply);
                 },
                 .divide => {
-                    try self.binary(divide);
+                    try self.numeric(divide);
                 },
                 .negate => {
-                    try self.push(-self.pop());
+                    if (self.peek(0).is(.number)) {
+                        try self.push(.{ .number = -self.pop().number });
+                    } else {
+                        return Error.ExpectedNumberOperand;
+                    }
+                },
+                .not => {
+                    try self.push(.{ .bool = self.pop().isFalsy() });
                 },
                 .@"return" => {
-                    print("{d}\n", .{self.pop()});
+                    self.pop().debug();
+                    print("\n", .{});
                     return;
                 },
             }
