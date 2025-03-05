@@ -21,31 +21,25 @@ pub const Value = f64;
 
 pub const Chunk = struct {
     const Self = @This();
+    const Bytecode = ArrayList(u8);
+    const Constants = ArrayList(Value);
+    const Lines = ArrayList(u32);
 
-    code: ArrayList(u8),
-    constants: ArrayList(Value),
-    lines: ArrayList(u32),
+    code: Bytecode,
+    constants: Constants,
+    lines: Lines,
 
     pub fn init(allocator: Allocator) Self {
         return Chunk{
-            .code = ArrayList(u8).init(allocator),
-            .constants = ArrayList(Value).init(allocator),
-            .lines = ArrayList(u32).init(allocator),
+            .code = Bytecode.init(allocator),
+            .constants = Constants.init(allocator),
+            .lines = Lines.init(allocator),
         };
     }
 
     fn write(self: *Self, byte: u8, line: u32) !void {
         try self.code.append(byte);
         try self.lines.append(line);
-    }
-
-    fn writeOperation(self: *Chunk, operation: Operation, line: u32) !void {
-        try self.write(@intFromEnum(operation), line);
-    }
-
-    fn writeConstant(self: *Chunk, value: Value, line: u32) !void {
-        try self.constants.append(value);
-        try self.write(@intCast(self.constants.items.len - 1), line);
     }
 
     pub fn disassemble(self: Chunk, name: []const u8) void {
@@ -118,6 +112,7 @@ pub const Compiler = struct {
         infix: ?ParseFn = null,
         precedence: Precedence = .none,
     };
+    const ParseRules = EnumArray(TokenKind, ParseRule);
     pub const Error = error{
         MissingExpressionRightParen,
         MissingExpression,
@@ -129,15 +124,15 @@ pub const Compiler = struct {
     current: Token,
     previous: Token,
     chunk: *Chunk,
-    rules: EnumArray(TokenKind, ParseRule),
+    rules: ParseRules,
 
-    pub fn init(source: []const u8, chunk: *Chunk) !Self {
+    pub fn init(source: []const u8, chunk: *Chunk) Self {
         return Self{
-            .scanner = try Scanner.init(source),
+            .scanner = Scanner.init(source),
             .current = undefined,
             .previous = undefined,
             .chunk = chunk,
-            .rules = EnumArray(TokenKind, ParseRule).initDefault(.{}, .{
+            .rules = ParseRules.initDefault(.{}, .{
                 .left_paren = .{ .prefix = grouping },
                 .minus = .{ .prefix = unary, .infix = binary, .precedence = .term },
                 .plus = .{ .infix = binary, .precedence = .term },
@@ -234,9 +229,5 @@ pub const Compiler = struct {
         try self.expression();
         try self.consume(.eof, Error.MissingExpressionEnd);
         try self.emitOperation(.@"return");
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.scanner.deinit();
     }
 };

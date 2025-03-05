@@ -1,6 +1,5 @@
 const std = @import("std");
 const print = std.debug.print;
-const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const Operation = @import("compiler.zig").Operation;
 const Value = @import("compiler.zig").Value;
@@ -9,20 +8,19 @@ const Chunk = @import("compiler.zig").Chunk;
 
 pub const VM = struct {
     const Self = @This();
+    const Stack = std.ArrayList(Value);
 
     debug: bool,
-    stack: ArrayList(Value),
-    allocator: Allocator,
-    ptr: [*]u8,
+    stack: Stack,
     chunk: Chunk,
+    ptr: [*]u8,
 
-    pub fn init(debug: bool, allocator: Allocator) Self {
+    pub fn init(debug: bool, chunk: Chunk, allocator: Allocator) Self {
         return Self{
             .debug = debug,
-            .stack = ArrayList(Value).init(allocator),
-            .allocator = allocator,
-            .chunk = Chunk.init(allocator),
-            .ptr = undefined,
+            .stack = Stack.init(allocator),
+            .chunk = chunk,
+            .ptr = chunk.code.items.ptr,
         };
     }
 
@@ -47,10 +45,29 @@ pub const VM = struct {
         return self.chunk.constants.items[self.readByte()];
     }
 
-    fn run(self: *Self, source: []const u8) !void {
-        var compiler = try Compiler.init(source, &self.chunk);
-        try compiler.run();
-        compiler.deinit();
+    fn add(a: f64, b: f64) f64 {
+        return a + b;
+    }
+
+    fn subtract(a: f64, b: f64) f64 {
+        return a - b;
+    }
+
+    fn multiply(a: f64, b: f64) f64 {
+        return a * b;
+    }
+
+    fn divide(a: f64, b: f64) f64 {
+        return a / b;
+    }
+
+    fn binary(self: *Self, f: *const fn (a: f64, b: f64) f64) !void {
+        const b = self.pop();
+        const a = self.pop();
+        try self.push(f(a, b));
+    }
+
+    pub fn run(self: *Self) !void {
         while (true) {
             if (self.debug) {
                 print("          ", .{});
@@ -70,16 +87,16 @@ pub const VM = struct {
                     try self.push(self.readConstant());
                 },
                 .add => {
-                    try self.push(self.pop() + self.pop());
+                    try self.binary(add);
                 },
                 .subtract => {
-                    try self.push(self.pop() - self.pop());
+                    try self.binary(subtract);
                 },
                 .multiply => {
-                    try self.push(self.pop() * self.pop());
+                    try self.binary(multiply);
                 },
                 .divide => {
-                    try self.push(self.pop() / self.pop());
+                    try self.binary(divide);
                 },
                 .negate => {
                     try self.push(-self.pop());
@@ -92,27 +109,7 @@ pub const VM = struct {
         }
     }
 
-    pub fn repl(self: *Self) !void {
-        const reader = std.io.getStdIn().reader();
-        while (true) {
-            print("> ", .{});
-            const source = try reader.readUntilDelimiterAlloc(self.allocator, '\n', 1 << 20);
-            defer self.allocator.free(source);
-            try self.run(source);
-        }
-    }
-
-    pub fn runFile(self: *Self, path: [*:0]u8) !void {
-        const realpath = try std.fs.realpathAlloc(self.allocator, std.mem.span(path));
-        defer self.allocator.free(realpath);
-        const file = try std.fs.openFileAbsolute(realpath, .{});
-        defer file.close();
-        const source = try file.readToEndAlloc(self.allocator, 1 << 20);
-        try self.run(source);
-    }
-
     pub fn deinit(self: *Self) void {
         self.stack.deinit();
-        self.chunk.deinit();
     }
 };

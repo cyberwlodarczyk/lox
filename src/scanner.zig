@@ -1,7 +1,6 @@
 const std = @import("std");
 const ascii = std.ascii;
-const StringHashMap = std.StringHashMap;
-const Allocator = std.mem.Allocator;
+const StaticStringMap = std.static_string_map.StaticStringMap;
 
 pub const TokenKind = enum {
     left_paren,
@@ -57,54 +56,69 @@ pub const Scanner = struct {
         UnexpectedCharacter,
         UnterminatedString,
     };
+    const KEYWORDS = StaticStringMap(TokenKind).initComptime(.{
+        .{ "and", .@"and" },
+        .{ "class", .class },
+        .{ "else", .@"else" },
+        .{ "false", .false },
+        .{ "for", .@"for" },
+        .{ "fun", .fun },
+        .{ "if", .@"if" },
+        .{ "nil", .nil },
+        .{ "or", .@"or" },
+        .{ "print", .print },
+        .{ "return", .@"return" },
+        .{ "super", .super },
+        .{ "this", .this },
+        .{ "true", .true },
+        .{ "var", .@"var" },
+        .{ "while", .@"while" },
+    });
 
     line: u32,
     start: usize,
     current: usize,
     source: []const u8,
-    identifiers: StringHashMap(TokenKind),
 
-    pub fn init(source: []const u8) !Self {
-        var i = StringHashMap(TokenKind).init(std.heap.page_allocator);
-        try i.put("and", .@"and");
-        try i.put("class", .class);
-        try i.put("else", .@"else");
-        try i.put("false", .false);
-        try i.put("for", .@"for");
-        try i.put("fun", .fun);
-        try i.put("if", .@"if");
-        try i.put("nil", .nil);
-        try i.put("or", .@"or");
-        try i.put("print", .print);
-        try i.put("return", .@"return");
-        try i.put("super", .super);
-        try i.put("this", .this);
-        try i.put("true", .true);
-        try i.put("var", .@"var");
-        try i.put("while", .@"while");
-
+    pub fn init(source: []const u8) Self {
         return Self{
             .line = 1,
             .start = 0,
             .current = 0,
             .source = source,
-            .identifiers = i,
         };
     }
 
-    fn isAtEnd(self: Self) bool {
-        return self.source.len == self.current;
+    fn isDigit(char: ?u8) bool {
+        if (char) |c| {
+            return ascii.isDigit(c);
+        } else {
+            return false;
+        }
     }
 
-    fn peek(self: Self) u8 {
-        return self.source[self.current];
+    fn isIdentifier(char: ?u8) bool {
+        if (char) |c| {
+            return ascii.isAlphabetic(c) or c == '_';
+        } else {
+            return false;
+        }
+    }
+
+    fn peekAt(self: Self, delta: usize) ?u8 {
+        const i = self.current + delta;
+        if (i == self.source.len) {
+            return null;
+        }
+        return self.source[i];
+    }
+
+    fn peek(self: Self) ?u8 {
+        return self.peekAt(0);
     }
 
     fn peekNext(self: Self) ?u8 {
-        if (self.source.len >= self.current + 1) {
-            return null;
-        }
-        return self.source[self.current + 1];
+        return self.peekAt(1);
     }
 
     fn makeLexeme(self: Self) []const u8 {
@@ -122,7 +136,7 @@ pub const Scanner = struct {
     fn makeIdentifierToken(self: Self) Token {
         const lexeme = self.makeLexeme();
         return Token{
-            .kind = self.identifiers.get(lexeme) orelse .identifier,
+            .kind = KEYWORDS.get(lexeme) orelse .identifier,
             .lexeme = lexeme,
             .line = self.line,
         };
@@ -136,15 +150,7 @@ pub const Scanner = struct {
         self.line += 1;
     }
 
-    fn advance(self: *Self) u8 {
-        defer self.next();
-        return self.peek();
-    }
-
     fn match(self: *Self, char: u8) bool {
-        if (self.isAtEnd()) {
-            return false;
-        }
         if (self.peek() != char) {
             return false;
         }
@@ -153,26 +159,30 @@ pub const Scanner = struct {
     }
 
     fn string(self: *Self) !Token {
-        while (!self.isAtEnd() and self.peek() != '"') {
-            if (self.peek() == '\n') {
+        while (true) {
+            const char = self.peek();
+            if (char == null) {
+                return Error.UnterminatedString;
+            }
+            if (char == '"') {
+                break;
+            }
+            if (char == '\n') {
                 self.nextLine();
             }
             self.next();
-        }
-        if (self.isAtEnd()) {
-            return Error.UnterminatedString;
         }
         self.next();
         return self.makeToken(.string);
     }
 
     fn number(self: *Self) Token {
-        while (ascii.isDigit(self.peek())) {
+        while (isDigit(self.peek())) {
             self.next();
         }
-        if (self.peek() == '.' and ascii.isDigit(self.peekNext() orelse 'a')) {
+        if (self.peek() == '.' and isDigit(self.peekNext())) {
             self.next();
-            while (ascii.isDigit(self.peek())) {
+            while (isDigit(self.peek())) {
                 self.next();
             }
         }
@@ -180,20 +190,15 @@ pub const Scanner = struct {
     }
 
     fn identifier(self: *Self) Token {
-        while (true) {
-            const char = self.peek();
-            if (ascii.isAlphanumeric(char) or char == '_') {
-                self.next();
-            } else {
-                break;
-            }
+        while (isIdentifier(self.peek())) {
+            self.next();
         }
         return self.makeIdentifierToken();
     }
 
     fn skipWhitespace(self: *Self) void {
-        while (!self.isAtEnd()) {
-            switch (self.peek()) {
+        while (true) {
+            switch (self.peek() orelse return) {
                 ' ', '\r', '\t' => {
                     self.next();
                 },
@@ -202,16 +207,16 @@ pub const Scanner = struct {
                     self.nextLine();
                 },
                 '/' => {
-                    if (self.peekNext()) |char| {
-                        if (char != '/') {
+                    if (self.peekNext()) |c1| {
+                        if (c1 != '/') {
                             return;
                         }
-                        while (!self.isAtEnd()) {
-                            if (self.peek() == '\n') {
+                        while (true) {
+                            const c0 = self.peek();
+                            if (c0 == null or c0 == '\n') {
                                 break;
-                            } else {
-                                self.next();
                             }
+                            self.next();
                         }
                     } else {
                         return;
@@ -227,14 +232,12 @@ pub const Scanner = struct {
     pub fn token(self: *Self) !Token {
         self.skipWhitespace();
         self.start = self.current;
-        if (self.isAtEnd()) {
-            return self.makeToken(.eof);
-        }
-        const char = self.advance();
-        if (ascii.isAlphabetic(char) or char == '_') {
+        const char = self.peek() orelse return self.makeToken(.eof);
+        self.next();
+        if (isIdentifier(char)) {
             return self.identifier();
         }
-        if (ascii.isDigit(char)) {
+        if (isDigit(char)) {
             return self.number();
         }
         if (char == '"') {
@@ -286,9 +289,5 @@ pub const Scanner = struct {
             return self.makeToken(k);
         }
         return Error.UnexpectedCharacter;
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.identifiers.deinit();
     }
 };
