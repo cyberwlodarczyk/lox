@@ -7,22 +7,22 @@ const VM = @import("vm.zig").VM;
 pub const Lox = struct {
     const Self = @This();
 
-    debug: bool,
     allocator: Allocator,
+    debug: bool,
 
-    pub fn init(debug: bool, allocator: Allocator) Self {
+    pub fn init(allocator: Allocator, debug: bool) Self {
         return Self{
-            .debug = debug,
             .allocator = allocator,
+            .debug = debug,
         };
     }
 
     fn run(self: Self, source: []const u8) !void {
         var chunk = Chunk.init(self.allocator);
         defer chunk.deinit();
-        var compiler = Compiler.init(source, &chunk);
+        var compiler = Compiler.init(self.allocator, source, &chunk);
         try compiler.run();
-        var vm = VM.init(self.debug, chunk, self.allocator);
+        var vm = VM.init(self.allocator, self.debug, chunk);
         defer vm.deinit();
         try vm.run();
     }

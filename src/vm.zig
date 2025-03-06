@@ -12,15 +12,18 @@ pub const VM = struct {
     pub const Error = error{
         ExpectedNumberOperand,
         ExpectedNumberOperands,
+        ExpectedAddOperands,
     };
 
+    allocator: Allocator,
     debug: bool,
     stack: Stack,
     chunk: Chunk,
     ptr: [*]u8,
 
-    pub fn init(debug: bool, chunk: Chunk, allocator: Allocator) Self {
+    pub fn init(allocator: Allocator, debug: bool, chunk: Chunk) Self {
         return Self{
+            .allocator = allocator,
             .debug = debug,
             .stack = Stack.init(allocator),
             .chunk = chunk,
@@ -94,6 +97,16 @@ pub const VM = struct {
         return self.binary(f);
     }
 
+    fn concat(self: *Self) !void {
+        const b = self.pop();
+        const a = self.pop();
+        try self.push(.{ .string = try std.mem.join(
+            self.allocator,
+            "",
+            &.{ a.string, b.string },
+        ) });
+    }
+
     pub fn run(self: *Self) !void {
         while (true) {
             if (self.debug) {
@@ -134,7 +147,15 @@ pub const VM = struct {
                     try self.numeric(less);
                 },
                 .add => {
-                    try self.numeric(add);
+                    const b = self.peek(0);
+                    const a = self.peek(1);
+                    if (a.is(.string) and b.is(.string)) {
+                        try self.concat();
+                    } else if (a.is(.number) and b.is(.number)) {
+                        try self.binary(add);
+                    } else {
+                        return Error.ExpectedAddOperands;
+                    }
                 },
                 .subtract => {
                     try self.numeric(subtract);

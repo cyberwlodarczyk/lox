@@ -31,11 +31,12 @@ pub const Value = union(enum) {
     bool: bool,
     nil,
     number: f64,
+    string: []const u8,
 
     pub fn debug(self: Self) void {
         switch (self) {
-            .bool => |x| {
-                if (x) {
+            .bool => |b| {
+                if (b) {
                     print("true", .{});
                 } else {
                     print("false", .{});
@@ -44,8 +45,11 @@ pub const Value = union(enum) {
             .nil => {
                 print("nil", .{});
             },
-            .number => |x| {
-                print("{d}", .{x});
+            .number => |n| {
+                print("{d}", .{n});
+            },
+            .string => |s| {
+                print("{s}", .{s});
             },
         }
     }
@@ -62,6 +66,7 @@ pub const Value = union(enum) {
             .bool => |x| x == other.bool,
             .nil => true,
             .number => |x| x == other.number,
+            .string => |s| std.mem.eql(u8, s, other.string),
         };
     }
 
@@ -69,7 +74,7 @@ pub const Value = union(enum) {
         return switch (self) {
             .bool => |x| !x,
             .nil => true,
-            .number => false,
+            else => false,
         };
     }
 };
@@ -186,9 +191,11 @@ pub const Compiler = struct {
     previous: Token,
     chunk: *Chunk,
     rules: ParseRules,
+    allocator: Allocator,
 
-    pub fn init(source: []const u8, chunk: *Chunk) Self {
+    pub fn init(allocator: Allocator, source: []const u8, chunk: *Chunk) Self {
         return Self{
+            .allocator = allocator,
             .scanner = Scanner.init(source),
             .current = undefined,
             .previous = undefined,
@@ -210,6 +217,7 @@ pub const Compiler = struct {
                 .greater = .{ .infix = binary, .precedence = .comparison },
                 .less_equal = .{ .infix = binary, .precedence = .comparison },
                 .less = .{ .infix = binary, .precedence = .comparison },
+                .string = .{ .prefix = string },
             }),
         };
     }
@@ -263,6 +271,15 @@ pub const Compiler = struct {
     fn number(self: *Self) !void {
         const value = try std.fmt.parseFloat(f64, self.previous.lexeme);
         try self.emitConstant(.{ .number = value });
+    }
+
+    fn string(self: *Self) !void {
+        try self.emitConstant(.{
+            .string = try self.allocator.dupe(
+                u8,
+                self.previous.lexeme[1 .. self.previous.lexeme.len - 1],
+            ),
+        });
     }
 
     fn unary(self: *Self) !void {
