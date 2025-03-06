@@ -12,6 +12,10 @@ pub const Operation = enum(u8) {
     nil,
     true,
     false,
+    pop,
+    get_global,
+    define_global,
+    set_global,
     equal,
     greater,
     less,
@@ -21,6 +25,7 @@ pub const Operation = enum(u8) {
     divide,
     not,
     negate,
+    print,
     @"return",
 };
 
@@ -123,6 +128,10 @@ pub const Chunk = struct {
             .nil => simpleInstruction("nil", offset),
             .true => simpleInstruction("true", offset),
             .false => simpleInstruction("false", offset),
+            .pop => simpleInstruction("pop", offset),
+            .get_global => self.constantInstruction("get_global", offset),
+            .define_global => self.constantInstruction("define_global", offset),
+            .set_global => self.constantInstruction("set_global", offset),
             .equal => simpleInstruction("equal", offset),
             .greater => simpleInstruction("greater", offset),
             .less => simpleInstruction("less", offset),
@@ -132,6 +141,7 @@ pub const Chunk = struct {
             .divide => simpleInstruction("divide", offset),
             .not => simpleInstruction("not", offset),
             .negate => simpleInstruction("negate", offset),
+            .print => simpleInstruction("print", offset),
             .@"return" => simpleInstruction("return", offset),
         };
     }
@@ -183,7 +193,11 @@ pub const Compiler = struct {
         MissingExpressionRightParen,
         MissingExpression,
         MissingExpressionEnd,
+        MissingExpressionSemicolon,
+        MissingVarDeclarationSemicolon,
+        MissingVarName,
         TooManyConstants,
+        InvalidAssignmentTarget,
     };
 
     scanner: Scanner,
@@ -191,6 +205,7 @@ pub const Compiler = struct {
     previous: Token,
     chunk: *Chunk,
     rules: ParseRules,
+    canAssign: bool,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, source: []const u8, chunk: *Chunk) Self {
@@ -218,7 +233,9 @@ pub const Compiler = struct {
                 .less_equal = .{ .infix = binary, .precedence = .comparison },
                 .less = .{ .infix = binary, .precedence = .comparison },
                 .string = .{ .prefix = string },
+                .identifier = .{ .prefix = variable },
             }),
+            .canAssign = false,
         };
     }
 
@@ -235,6 +252,23 @@ pub const Compiler = struct {
         }
     }
 
+    fn match(self: *Self, kind: TokenKind) !bool {
+        if (self.current.kind != kind) {
+            return false;
+        }
+        try self.advance();
+        return true;
+    }
+
+    fn makeConstant(self: *Self, value: Value) !u8 {
+        const constants = &self.chunk.constants;
+        if (constants.items.len == std.math.maxInt(u8) + 1) {
+            return Error.TooManyConstants;
+        }
+        try constants.append(value);
+        return @intCast(constants.items.len - 1);
+    }
+
     fn emit(self: *Self, byte: u8) !void {
         try self.chunk.write(byte, self.previous.line);
     }
@@ -244,28 +278,78 @@ pub const Compiler = struct {
     }
 
     fn emitConstant(self: *Self, value: Value) !void {
-        if (self.chunk.constants.items.len == std.math.maxInt(u8) + 1) {
-            return Error.TooManyConstants;
-        }
-        try self.chunk.constants.append(value);
+        const i = try self.makeConstant(value);
         try self.emitOperation(.constant);
-        try self.emit(@intCast(self.chunk.constants.items.len - 1));
+        try self.emit(i);
     }
 
     fn parsePrecedence(self: *Self, precedence: Precedence) !void {
         try self.advance();
         const rule = self.rules.get(self.previous.kind);
         const prefix = rule.prefix orelse return Error.MissingExpression;
+        self.canAssign = @intFromEnum(precedence) <= @intFromEnum(Precedence.assignment);
         try prefix(self);
         while (@intFromEnum(precedence) <= @intFromEnum(self.rules.get(self.current.kind).precedence)) {
             try self.advance();
             const infix = self.rules.get(self.previous.kind).infix.?;
             try infix(self);
         }
+        if (self.canAssign and try self.match(.equal)) {
+            return Error.InvalidAssignmentTarget;
+        }
+    }
+
+    fn identifierConstant(self: *Self, token: Token) !u8 {
+        return self.makeConstant(.{ .string = try self.allocator.dupe(u8, token.lexeme) });
+    }
+
+    fn parseVariable(self: *Self, @"error": Error) !u8 {
+        try self.consume(.identifier, @"error");
+        return self.identifierConstant(self.previous);
     }
 
     fn expression(self: *Self) !void {
         try self.parsePrecedence(.assignment);
+    }
+
+    fn expressionStatement(self: *Self) !void {
+        try self.expression();
+        try self.consume(.semicolon, Error.MissingExpressionSemicolon);
+        try self.emitOperation(.pop);
+    }
+
+    fn printStatement(self: *Self) !void {
+        try self.expression();
+        try self.consume(.semicolon, Error.MissingExpressionSemicolon);
+        try self.emitOperation(.print);
+    }
+
+    fn statement(self: *Self) !void {
+        if (try self.match(.print)) {
+            try self.printStatement();
+        } else {
+            try self.expressionStatement();
+        }
+    }
+
+    fn varDeclaration(self: *Self) !void {
+        const i = try self.parseVariable(Error.MissingVarName);
+        if (try self.match(.equal)) {
+            try self.expression();
+        } else {
+            try self.emitOperation(.nil);
+        }
+        try self.consume(.semicolon, Error.MissingVarDeclarationSemicolon);
+        try self.emitOperation(.define_global);
+        try self.emit(i);
+    }
+
+    fn declaration(self: *Self) !void {
+        if (try self.match(.@"var")) {
+            try self.varDeclaration();
+        } else {
+            try self.statement();
+        }
     }
 
     fn number(self: *Self) !void {
@@ -280,6 +364,21 @@ pub const Compiler = struct {
                 self.previous.lexeme[1 .. self.previous.lexeme.len - 1],
             ),
         });
+    }
+
+    fn namedVariable(self: *Self, name: Token) !void {
+        const i = try self.identifierConstant(name);
+        if (self.canAssign and try self.match(.equal)) {
+            try self.expression();
+            try self.emitOperation(.set_global);
+        } else {
+            try self.emitOperation(.get_global);
+        }
+        try self.emit(i);
+    }
+
+    fn variable(self: *Self) !void {
+        try self.namedVariable(self.previous);
     }
 
     fn unary(self: *Self) !void {
@@ -333,8 +432,9 @@ pub const Compiler = struct {
 
     pub fn run(self: *Self) !void {
         try self.advance();
-        try self.expression();
-        try self.consume(.eof, Error.MissingExpressionEnd);
+        while (!try self.match(.eof)) {
+            try self.declaration();
+        }
         try self.emitOperation(.@"return");
     }
 };

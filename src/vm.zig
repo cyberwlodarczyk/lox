@@ -9,15 +9,18 @@ const Chunk = @import("compiler.zig").Chunk;
 pub const VM = struct {
     const Self = @This();
     const Stack = std.ArrayList(Value);
+    const Globals = std.StringHashMap(Value);
     pub const Error = error{
         ExpectedNumberOperand,
         ExpectedNumberOperands,
         ExpectedAddOperands,
+        UndefinedVariable,
     };
 
     allocator: Allocator,
     debug: bool,
     stack: Stack,
+    globals: Globals,
     chunk: Chunk,
     ptr: [*]u8,
 
@@ -26,6 +29,7 @@ pub const VM = struct {
             .allocator = allocator,
             .debug = debug,
             .stack = Stack.init(allocator),
+            .globals = Globals.init(allocator),
             .chunk = chunk,
             .ptr = chunk.code.items.ptr,
         };
@@ -43,17 +47,17 @@ pub const VM = struct {
         return self.stack.pop();
     }
 
-    fn readByte(self: *Self) u8 {
+    fn read(self: *Self) u8 {
         defer self.ptr += 1;
         return @as(*u8, @ptrCast(self.ptr)).*;
     }
 
     fn readOperation(self: *Self) Operation {
-        return @enumFromInt(self.readByte());
+        return @enumFromInt(self.read());
     }
 
     fn readConstant(self: *Self) Value {
-        return self.chunk.constants.items[self.readByte()];
+        return self.chunk.constants.items[self.read()];
     }
 
     fn add(a: Value, b: Value) Value {
@@ -137,6 +141,29 @@ pub const VM = struct {
                 .false => {
                     try self.push(.{ .bool = false });
                 },
+                .pop => {
+                    _ = self.pop();
+                },
+                .get_global => {
+                    if (self.globals.get(self.readConstant().string)) |value| {
+                        try self.push(value);
+                    } else {
+                        return Error.UndefinedVariable;
+                    }
+                },
+                .define_global => {
+                    try self.globals.put(
+                        self.readConstant().string,
+                        self.pop(),
+                    );
+                },
+                .set_global => {
+                    const name = self.readConstant().string;
+                    if (!self.globals.contains(name)) {
+                        return Error.UndefinedVariable;
+                    }
+                    try self.globals.put(name, self.peek(0));
+                },
                 .equal => {
                     try self.binary(equal);
                 },
@@ -176,9 +203,11 @@ pub const VM = struct {
                 .not => {
                     try self.push(.{ .bool = self.pop().isFalsy() });
                 },
-                .@"return" => {
+                .print => {
                     self.pop().debug();
                     print("\n", .{});
+                },
+                .@"return" => {
                     return;
                 },
             }

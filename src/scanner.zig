@@ -266,7 +266,7 @@ pub const Scanner = struct {
                 if (self.match('=')) {
                     break :x .equal_equal;
                 } else {
-                    break :x .bang;
+                    break :x .equal;
                 }
             },
             '<' => x: {
