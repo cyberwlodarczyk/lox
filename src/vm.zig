@@ -1,6 +1,7 @@
 const std = @import("std");
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
+const Config = @import("lox.zig").Config;
 const Operation = @import("compiler.zig").Operation;
 const Value = @import("compiler.zig").Value;
 const Compiler = @import("compiler.zig").Compiler;
@@ -18,16 +19,16 @@ pub const VM = struct {
     };
 
     allocator: Allocator,
-    debug: bool,
+    config: Config,
     stack: Stack,
     globals: Globals,
     chunk: Chunk,
     ptr: [*]u8,
 
-    pub fn init(allocator: Allocator, debug: bool, chunk: Chunk) Self {
+    pub fn init(allocator: Allocator, config: Config, chunk: Chunk) Self {
         return Self{
             .allocator = allocator,
-            .debug = debug,
+            .config = config,
             .stack = Stack.init(allocator),
             .globals = Globals.init(allocator),
             .chunk = chunk,
@@ -113,7 +114,7 @@ pub const VM = struct {
 
     pub fn run(self: *Self) !void {
         while (true) {
-            if (self.debug) {
+            if (self.config.debug.trace_execution) {
                 print("          ", .{});
                 for (self.stack.items) |value| {
                     print("[ ", .{});
@@ -121,7 +122,7 @@ pub const VM = struct {
                     print(" ]", .{});
                 }
                 print("\n", .{});
-                _ = self.chunk.disassembleInstruction(@intFromPtr(
+                _ = self.chunk.debugAt(@intFromPtr(
                     self.ptr,
                 ) - @intFromPtr(
                     self.chunk.code.items.ptr,

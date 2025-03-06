@@ -4,25 +4,32 @@ const Chunk = @import("compiler.zig").Chunk;
 const Compiler = @import("compiler.zig").Compiler;
 const VM = @import("vm.zig").VM;
 
+pub const Config = struct {
+    debug: struct {
+        print_code: bool,
+        trace_execution: bool,
+    },
+};
+
 pub const Lox = struct {
     const Self = @This();
 
     allocator: Allocator,
-    debug: bool,
+    config: Config,
 
-    pub fn init(allocator: Allocator, debug: bool) Self {
+    pub fn init(allocator: Allocator, config: Config) Self {
         return Self{
             .allocator = allocator,
-            .debug = debug,
+            .config = config,
         };
     }
 
     fn run(self: Self, source: []const u8) !void {
         var chunk = Chunk.init(self.allocator);
         defer chunk.deinit();
-        var compiler = Compiler.init(self.allocator, source, &chunk);
+        var compiler = Compiler.init(self.allocator, self.config, source, &chunk);
         try compiler.run();
-        var vm = VM.init(self.allocator, self.debug, chunk);
+        var vm = VM.init(self.allocator, self.config, chunk);
         defer vm.deinit();
         try vm.run();
     }

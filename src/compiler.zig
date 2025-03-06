@@ -3,6 +3,7 @@ const print = std.debug.print;
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const EnumArray = std.enums.EnumArray;
+const Config = @import("lox.zig").Config;
 const Token = @import("scanner.zig").Token;
 const TokenKind = @import("scanner.zig").TokenKind;
 const Scanner = @import("scanner.zig").Scanner;
@@ -107,15 +108,7 @@ pub const Chunk = struct {
         try self.lines.append(line);
     }
 
-    pub fn disassemble(self: Chunk, name: []const u8) void {
-        print("== {s} ==\n", .{name});
-        var offset: usize = 0;
-        while (offset < self.code.items.len) {
-            offset = self.disassembleInstruction(offset);
-        }
-    }
-
-    pub fn disassembleInstruction(self: Chunk, offset: usize) usize {
+    pub fn debugAt(self: Chunk, offset: usize) usize {
         print("{d:0>4} ", .{offset});
         if (offset > 0 and self.lines.items[offset] == self.lines.items[offset - 1]) {
             print("   | ", .{});
@@ -124,40 +117,27 @@ pub const Chunk = struct {
         }
         const operation: Operation = @enumFromInt(self.code.items[offset]);
         return switch (operation) {
-            .constant => self.constantInstruction("constant", offset),
-            .nil => simpleInstruction("nil", offset),
-            .true => simpleInstruction("true", offset),
-            .false => simpleInstruction("false", offset),
-            .pop => simpleInstruction("pop", offset),
-            .get_global => self.constantInstruction("get_global", offset),
-            .define_global => self.constantInstruction("define_global", offset),
-            .set_global => self.constantInstruction("set_global", offset),
-            .equal => simpleInstruction("equal", offset),
-            .greater => simpleInstruction("greater", offset),
-            .less => simpleInstruction("less", offset),
-            .add => simpleInstruction("add", offset),
-            .subtract => simpleInstruction("subtract", offset),
-            .multiply => simpleInstruction("multiply", offset),
-            .divide => simpleInstruction("divide", offset),
-            .not => simpleInstruction("not", offset),
-            .negate => simpleInstruction("negate", offset),
-            .print => simpleInstruction("print", offset),
-            .@"return" => simpleInstruction("return", offset),
+            .constant, .get_global, .define_global, .set_global => o: {
+                const constant = self.code.items[offset + 1];
+                const value = self.constants.items[constant];
+                print("{s: <16} {d:>4} '", .{ @tagName(operation), constant });
+                value.debug();
+                print("'\n", .{});
+                break :o offset + 2;
+            },
+            else => o: {
+                print("{s}\n", .{@tagName(operation)});
+                break :o offset + 1;
+            },
         };
     }
 
-    fn simpleInstruction(name: []const u8, offset: usize) usize {
-        print("{s}\n", .{name});
-        return offset + 1;
-    }
-
-    fn constantInstruction(self: Chunk, name: []const u8, offset: usize) usize {
-        const constant = self.code.items[offset + 1];
-        const value = self.constants.items[constant];
-        print("{s: <16} {d:>4} '\n", .{ name, constant });
-        value.debug();
-        print("'\n", .{});
-        return offset + 2;
+    pub fn debug(self: Chunk, name: []const u8) void {
+        print("== {s} ==\n", .{name});
+        var offset: usize = 0;
+        while (offset < self.code.items.len) {
+            offset = self.debugAt(offset);
+        }
     }
 
     pub fn deinit(self: *Chunk) void {
@@ -200,17 +180,19 @@ pub const Compiler = struct {
         InvalidAssignmentTarget,
     };
 
+    allocator: Allocator,
+    config: Config,
     scanner: Scanner,
     current: Token,
     previous: Token,
     chunk: *Chunk,
     rules: ParseRules,
-    canAssign: bool,
-    allocator: Allocator,
+    can_assign: bool,
 
-    pub fn init(allocator: Allocator, source: []const u8, chunk: *Chunk) Self {
+    pub fn init(allocator: Allocator, config: Config, source: []const u8, chunk: *Chunk) Self {
         return Self{
             .allocator = allocator,
+            .config = config,
             .scanner = Scanner.init(source),
             .current = undefined,
             .previous = undefined,
@@ -235,7 +217,7 @@ pub const Compiler = struct {
                 .string = .{ .prefix = string },
                 .identifier = .{ .prefix = variable },
             }),
-            .canAssign = false,
+            .can_assign = false,
         };
     }
 
@@ -287,14 +269,14 @@ pub const Compiler = struct {
         try self.advance();
         const rule = self.rules.get(self.previous.kind);
         const prefix = rule.prefix orelse return Error.MissingExpression;
-        self.canAssign = @intFromEnum(precedence) <= @intFromEnum(Precedence.assignment);
+        self.can_assign = @intFromEnum(precedence) <= @intFromEnum(Precedence.assignment);
         try prefix(self);
         while (@intFromEnum(precedence) <= @intFromEnum(self.rules.get(self.current.kind).precedence)) {
             try self.advance();
             const infix = self.rules.get(self.previous.kind).infix.?;
             try infix(self);
         }
-        if (self.canAssign and try self.match(.equal)) {
+        if (self.can_assign and try self.match(.equal)) {
             return Error.InvalidAssignmentTarget;
         }
     }
@@ -368,7 +350,7 @@ pub const Compiler = struct {
 
     fn namedVariable(self: *Self, name: Token) !void {
         const i = try self.identifierConstant(name);
-        if (self.canAssign and try self.match(.equal)) {
+        if (self.can_assign and try self.match(.equal)) {
             try self.expression();
             try self.emitOperation(.set_global);
         } else {
@@ -436,5 +418,8 @@ pub const Compiler = struct {
             try self.declaration();
         }
         try self.emitOperation(.@"return");
+        if (self.config.debug.print_code) {
+            self.chunk.debug("code");
+        }
     }
 };

@@ -56,7 +56,7 @@ pub const Scanner = struct {
         UnexpectedCharacter,
         UnterminatedString,
     };
-    const KEYWORDS = StaticStringMap(TokenKind).initComptime(.{
+    const keywords = StaticStringMap(TokenKind).initComptime(.{
         .{ "and", .@"and" },
         .{ "class", .class },
         .{ "else", .@"else" },
@@ -136,7 +136,7 @@ pub const Scanner = struct {
     fn makeIdentifierToken(self: Self) Token {
         const lexeme = self.makeLexeme();
         return Token{
-            .kind = KEYWORDS.get(lexeme) orelse .identifier,
+            .kind = keywords.get(lexeme) orelse .identifier,
             .lexeme = lexeme,
             .line = self.line,
         };

@@ -2,13 +2,26 @@ const std = @import("std");
 const heap = std.heap;
 const print = std.debug.print;
 const Lox = @import("lox.zig").Lox;
+const Config = @import("lox.zig").Config;
+
+fn getEnvFlag(name: []const u8) bool {
+    if (std.posix.getenv(name)) |value| {
+        return std.mem.eql(u8, value, "true");
+    } else {
+        return false;
+    }
+}
 
 pub fn main() !void {
-    const debug_env = std.posix.getenv("DEBUG") orelse "";
-    const debug = std.mem.eql(u8, debug_env, "true");
     var arena = heap.ArenaAllocator.init(heap.page_allocator);
     defer arena.deinit();
-    const lox = Lox.init(arena.allocator(), debug);
+    const lox = Lox.init(
+        arena.allocator(),
+        Config{ .debug = .{
+            .print_code = getEnvFlag("DEBUG_PRINT_CODE"),
+            .trace_execution = getEnvFlag("DEBUG_TRACE_EXECUTION"),
+        } },
+    );
     const argv = std.os.argv;
     if (argv.len == 1) {
         try lox.repl();
