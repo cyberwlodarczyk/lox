@@ -14,6 +14,8 @@ pub const Operation = enum(u8) {
     true,
     false,
     pop,
+    get_local,
+    set_local,
     get_global,
     define_global,
     set_global,
@@ -116,17 +118,22 @@ pub const Chunk = struct {
             print("{d: >4} ", .{self.lines.items[offset]});
         }
         const operation: Operation = @enumFromInt(self.code.items[offset]);
+        const name = @tagName(operation);
         return switch (operation) {
             .constant, .get_global, .define_global, .set_global => o: {
                 const constant = self.code.items[offset + 1];
                 const value = self.constants.items[constant];
-                print("{s: <16} {d:>4} '", .{ @tagName(operation), constant });
+                print("{s: <16} {d:>4} '", .{ name, constant });
                 value.debug();
                 print("'\n", .{});
                 break :o offset + 2;
             },
+            .get_local, .set_local => o: {
+                print("{s: <16} {d:>4}", .{ name, self.code.items[offset + 1] });
+                break :o offset + 2;
+            },
             else => o: {
-                print("{s}\n", .{@tagName(operation)});
+                print("{s}\n", .{name});
                 break :o offset + 1;
             },
         };
@@ -169,6 +176,11 @@ pub const Compiler = struct {
         precedence: Precedence = .none,
     };
     const ParseRules = EnumArray(TokenKind, ParseRule);
+    const Local = struct {
+        name: Token,
+        depth: ?u32,
+    };
+    const Locals = ArrayList(Local);
     pub const Error = error{
         MissingExpressionRightParen,
         MissingExpression,
@@ -177,7 +189,11 @@ pub const Compiler = struct {
         MissingVarDeclarationSemicolon,
         MissingVarName,
         TooManyConstants,
+        TooManyLocals,
         InvalidAssignmentTarget,
+        ExpectedBlockRightBrace,
+        LocalAlreadyExists,
+        LocalOwnInitializer,
     };
 
     allocator: Allocator,
@@ -188,6 +204,8 @@ pub const Compiler = struct {
     chunk: *Chunk,
     rules: ParseRules,
     can_assign: bool,
+    scope_depth: u32,
+    locals: Locals,
 
     pub fn init(allocator: Allocator, config: Config, source: []const u8, chunk: *Chunk) Self {
         return Self{
@@ -218,6 +236,8 @@ pub const Compiler = struct {
                 .identifier = .{ .prefix = variable },
             }),
             .can_assign = false,
+            .scope_depth = 0,
+            .locals = Locals.init(allocator),
         };
     }
 
@@ -234,8 +254,12 @@ pub const Compiler = struct {
         }
     }
 
+    fn check(self: Self, kind: TokenKind) bool {
+        return self.current.kind == kind;
+    }
+
     fn match(self: *Self, kind: TokenKind) !bool {
-        if (self.current.kind != kind) {
+        if (!self.check(kind)) {
             return false;
         }
         try self.advance();
@@ -265,6 +289,29 @@ pub const Compiler = struct {
         try self.emit(i);
     }
 
+    fn beginScope(self: *Self) void {
+        self.scope_depth += 1;
+    }
+
+    fn endScope(self: *Self) !void {
+        self.scope_depth -= 1;
+        const len = self.locals.items.len;
+        if (len != 0) {
+            var i = len - 1;
+            while (i != 0) : (i -= 1) {
+                if (self.locals.items[i].depth.? > self.scope_depth) {
+                    _ = self.locals.orderedRemove(i);
+                } else {
+                    break;
+                }
+                try self.emitOperation(.pop);
+                if (i == 0) {
+                    break;
+                }
+            }
+        }
+    }
+
     fn parsePrecedence(self: *Self, precedence: Precedence) !void {
         try self.advance();
         const rule = self.rules.get(self.previous.kind);
@@ -285,13 +332,15 @@ pub const Compiler = struct {
         return self.makeConstant(.{ .string = try self.allocator.dupe(u8, token.lexeme) });
     }
 
-    fn parseVariable(self: *Self, @"error": Error) !u8 {
-        try self.consume(.identifier, @"error");
-        return self.identifierConstant(self.previous);
-    }
-
     fn expression(self: *Self) !void {
         try self.parsePrecedence(.assignment);
+    }
+
+    fn block(self: *Self) !void {
+        while (!self.check(.right_brace) and !self.check(.eof)) {
+            try self.declaration();
+        }
+        try self.consume(.right_brace, Error.ExpectedBlockRightBrace);
     }
 
     fn expressionStatement(self: *Self) !void {
@@ -309,24 +358,67 @@ pub const Compiler = struct {
     fn statement(self: *Self) !void {
         if (try self.match(.print)) {
             try self.printStatement();
+        } else if (try self.match(.left_brace)) {
+            self.beginScope();
+            try self.block();
+            try self.endScope();
         } else {
             try self.expressionStatement();
         }
     }
 
-    fn varDeclaration(self: *Self) !void {
-        const i = try self.parseVariable(Error.MissingVarName);
+    fn varInitializer(self: *Self) !void {
         if (try self.match(.equal)) {
             try self.expression();
         } else {
             try self.emitOperation(.nil);
         }
         try self.consume(.semicolon, Error.MissingVarDeclarationSemicolon);
+    }
+
+    fn varLocal(self: *Self) !void {
+        const name = self.previous;
+        const len = self.locals.items.len;
+        if (len != 0) {
+            var i = len - 1;
+            while (true) : (i -= 1) {
+                const local = self.locals.items[i];
+                if (local.depth.? < self.scope_depth) {
+                    break;
+                }
+                if (std.mem.eql(u8, local.name.lexeme, name.lexeme)) {
+                    return Error.LocalAlreadyExists;
+                }
+                if (i == 0) {
+                    break;
+                }
+            }
+        }
+        if (len == std.math.maxInt(u8) + 1) {
+            return Error.TooManyLocals;
+        }
+        try self.locals.append(.{ .name = name, .depth = null });
+        try self.varInitializer();
+        self.locals.items[self.locals.items.len - 1].depth = self.scope_depth;
+    }
+
+    fn varGlobal(self: *Self) !void {
+        const i = try self.identifierConstant(self.previous);
+        try self.varInitializer();
         try self.emitOperation(.define_global);
         try self.emit(i);
     }
 
-    fn declaration(self: *Self) !void {
+    fn varDeclaration(self: *Self) !void {
+        try self.consume(.identifier, Error.MissingVarName);
+        if (self.scope_depth == 0) {
+            try self.varGlobal();
+        } else {
+            try self.varLocal();
+        }
+    }
+
+    fn declaration(self: *Self) anyerror!void {
         if (try self.match(.@"var")) {
             try self.varDeclaration();
         } else {
@@ -348,15 +440,40 @@ pub const Compiler = struct {
         });
     }
 
+    fn resolveLocal(self: *Self, name: Token) !?u8 {
+        const len = self.locals.items.len;
+        if (len == 0) {
+            return null;
+        }
+        var i = len - 1;
+        while (true) : (i -= 1) {
+            const local = self.locals.items[i];
+            if (std.mem.eql(u8, name.lexeme, local.name.lexeme)) {
+                if (local.depth) |_| {
+                    return @intCast(i);
+                } else {
+                    return Error.LocalOwnInitializer;
+                }
+            }
+            if (i == 0) {
+                break;
+            }
+        }
+        return null;
+    }
+
     fn namedVariable(self: *Self, name: Token) !void {
-        const i = try self.identifierConstant(name);
+        const i = try self.resolveLocal(name);
+        const get: Operation = if (i) |_| .get_local else .get_global;
+        const set: Operation = if (i) |_| .set_local else .set_global;
+        const j = i orelse try self.identifierConstant(name);
         if (self.can_assign and try self.match(.equal)) {
             try self.expression();
-            try self.emitOperation(.set_global);
+            try self.emitOperation(set);
         } else {
-            try self.emitOperation(.get_global);
+            try self.emitOperation(get);
         }
-        try self.emit(i);
+        try self.emit(j);
     }
 
     fn variable(self: *Self) !void {

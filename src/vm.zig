@@ -145,6 +145,12 @@ pub const VM = struct {
                 .pop => {
                     _ = self.pop();
                 },
+                .get_local => {
+                    try self.push(self.stack.items[self.read()]);
+                },
+                .set_local => {
+                    self.stack.items[self.read()] = self.peek(0);
+                },
                 .get_global => {
                     if (self.globals.get(self.readConstant().string)) |value| {
                         try self.push(value);
