@@ -53,12 +53,20 @@ pub const VM = struct {
         return @as(*u8, @ptrCast(self.ptr)).*;
     }
 
+    fn readCast(self: *Self, comptime T: type) T {
+        return @as(T, @intCast(self.read()));
+    }
+
     fn readOperation(self: *Self) Operation {
         return @enumFromInt(self.read());
     }
 
     fn readConstant(self: *Self) Value {
         return self.chunk.constants.items[self.read()];
+    }
+
+    fn readOffset(self: *Self) u16 {
+        return (self.readCast(u16) << 8) | self.readCast(u16);
     }
 
     fn add(a: Value, b: Value) Value {
@@ -213,6 +221,20 @@ pub const VM = struct {
                 .print => {
                     self.pop().debug();
                     print("\n", .{});
+                },
+                .jump => {
+                    const offset = self.readOffset();
+                    self.ptr += offset;
+                },
+                .jump_if_false => {
+                    const jump = self.readOffset();
+                    if (self.peek(0).isFalsy()) {
+                        self.ptr += jump;
+                    }
+                },
+                .loop => {
+                    const offset = self.readOffset();
+                    self.ptr -= offset;
                 },
                 .@"return" => {
                     return;

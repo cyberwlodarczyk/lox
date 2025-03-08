@@ -1,5 +1,6 @@
 const std = @import("std");
 const print = std.debug.print;
+const maxInt = std.math.maxInt;
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const EnumArray = std.enums.EnumArray;
@@ -29,6 +30,9 @@ pub const Operation = enum(u8) {
     not,
     negate,
     print,
+    jump,
+    jump_if_false,
+    loop,
     @"return",
 };
 
@@ -129,8 +133,20 @@ pub const Chunk = struct {
                 break :o offset + 2;
             },
             .get_local, .set_local => o: {
-                print("{s: <16} {d:>4}", .{ name, self.code.items[offset + 1] });
+                print("{s: <16} {d:>4}\n", .{ name, self.code.items[offset + 1] });
                 break :o offset + 2;
+            },
+            .jump, .jump_if_false, .loop => o: {
+                var jump = @as(u16, @intCast(self.code.items[offset + 1])) << 8;
+                jump |= @as(u16, @intCast(self.code.items[offset + 2]));
+                var dest = offset + 3;
+                if (operation == .loop) {
+                    dest -= jump;
+                } else {
+                    dest += jump;
+                }
+                print("{s: <16} {d:>4} -> {d}\n", .{ name, offset, dest });
+                break :o offset + 3;
             },
             else => o: {
                 print("{s}\n", .{name});
@@ -194,6 +210,15 @@ pub const Compiler = struct {
         ExpectedBlockRightBrace,
         LocalAlreadyExists,
         LocalOwnInitializer,
+        ExpectedIfLeftParen,
+        ExpectedIfRightParen,
+        ExpectedWhileLeftParen,
+        ExpectedWhileRightParen,
+        ExpectedLeftParen,
+        ExpectedRightParen,
+        ExpectedSemicolon,
+        TooBigJump,
+        TooBigLoop,
     };
 
     allocator: Allocator,
@@ -234,6 +259,8 @@ pub const Compiler = struct {
                 .less = .{ .infix = binary, .precedence = .comparison },
                 .string = .{ .prefix = string },
                 .identifier = .{ .prefix = variable },
+                .@"and" = .{ .infix = @"and", .precedence = .@"and" },
+                .@"or" = .{ .infix = @"or", .precedence = .@"or" },
             }),
             .can_assign = false,
             .scope_depth = 0,
@@ -268,7 +295,7 @@ pub const Compiler = struct {
 
     fn makeConstant(self: *Self, value: Value) !u8 {
         const constants = &self.chunk.constants;
-        if (constants.items.len == std.math.maxInt(u8) + 1) {
+        if (constants.items.len == maxInt(u8) + 1) {
             return Error.TooManyConstants;
         }
         try constants.append(value);
@@ -287,6 +314,33 @@ pub const Compiler = struct {
         const i = try self.makeConstant(value);
         try self.emitOperation(.constant);
         try self.emit(i);
+    }
+
+    fn emitJump(self: *Self, operation: Operation) !usize {
+        try self.emitOperation(operation);
+        try self.emit(0xff);
+        try self.emit(0xff);
+        return self.chunk.code.items.len - 2;
+    }
+
+    fn emitLoop(self: *Self, start: usize) !void {
+        try self.emitOperation(.loop);
+        const offset = self.chunk.code.items.len - start + 2;
+        if (offset > maxInt(u16)) {
+            return Error.TooBigLoop;
+        }
+        try self.emit(@intCast((offset >> 8) & 0xff));
+        try self.emit(@intCast(offset & 0xff));
+    }
+
+    fn patchJump(self: *Self, offset: usize) !void {
+        const jump = self.chunk.code.items.len - offset - 2;
+        if (jump > maxInt(u16)) {
+            return Error.TooBigJump;
+        }
+        const code = &self.chunk.code;
+        code.items[offset] = @intCast((jump >> 8) & 0xff);
+        code.items[offset + 1] = @intCast(jump & 0xff);
     }
 
     fn beginScope(self: *Self) void {
@@ -328,6 +382,22 @@ pub const Compiler = struct {
         }
     }
 
+    fn @"and"(self: *Self) !void {
+        const end_jump = try self.emitJump(.jump_if_false);
+        try self.emitOperation(.pop);
+        try self.parsePrecedence(.@"and");
+        try self.patchJump(end_jump);
+    }
+
+    fn @"or"(self: *Self) !void {
+        const else_jump = try self.emitJump(.jump_if_false);
+        const end_jump = try self.emitJump(.jump);
+        try self.patchJump(else_jump);
+        try self.emitOperation(.pop);
+        try self.parsePrecedence(.@"or");
+        try self.patchJump(end_jump);
+    }
+
     fn identifierConstant(self: *Self, token: Token) !u8 {
         return self.makeConstant(.{ .string = try self.allocator.dupe(u8, token.lexeme) });
     }
@@ -349,15 +419,87 @@ pub const Compiler = struct {
         try self.emitOperation(.pop);
     }
 
+    fn ifStatement(self: *Self) !void {
+        try self.consume(.left_paren, Error.ExpectedIfLeftParen);
+        try self.expression();
+        try self.consume(.right_paren, Error.ExpectedIfRightParen);
+        const then_jump = try self.emitJump(.jump_if_false);
+        try self.emitOperation(.pop);
+        try self.statement();
+        const else_jump = try self.emitJump(.jump);
+        try self.patchJump(then_jump);
+        try self.emitOperation(.pop);
+        if (try self.match(.@"else")) {
+            try self.statement();
+        }
+        try self.patchJump(else_jump);
+    }
+
     fn printStatement(self: *Self) !void {
         try self.expression();
         try self.consume(.semicolon, Error.MissingExpressionSemicolon);
         try self.emitOperation(.print);
     }
 
-    fn statement(self: *Self) !void {
+    fn whileStatement(self: *Self) !void {
+        const loop_start = self.chunk.code.items.len;
+        try self.consume(.left_paren, Error.ExpectedWhileLeftParen);
+        try self.expression();
+        try self.consume(.right_paren, Error.ExpectedWhileRightParen);
+        const exit_jump = try self.emitJump(.jump_if_false);
+        try self.emitOperation(.pop);
+        try self.statement();
+        try self.emitLoop(loop_start);
+        try self.patchJump(exit_jump);
+        try self.emitOperation(.pop);
+    }
+
+    fn forStatement(self: *Self) !void {
+        self.beginScope();
+        try self.consume(.left_paren, Error.ExpectedLeftParen);
+        if (!try self.match(.semicolon)) {
+            if (try self.match(.@"var")) {
+                try self.varDeclaration();
+            } else {
+                try self.expressionStatement();
+            }
+        }
+        var loop_start = self.chunk.code.items.len;
+        var exit_jump: ?usize = null;
+        if (!try self.match(.semicolon)) {
+            try self.expression();
+            try self.consume(.semicolon, Error.ExpectedSemicolon);
+            exit_jump = try self.emitJump(.jump_if_false);
+            try self.emitOperation(.pop);
+        }
+        if (!try self.match(.right_paren)) {
+            const body_jump = try self.emitJump(.jump);
+            const increment_start = self.chunk.code.items.len;
+            try self.expression();
+            try self.emitOperation(.pop);
+            try self.consume(.right_paren, Error.ExpectedRightParen);
+            try self.emitLoop(loop_start);
+            loop_start = increment_start;
+            try self.patchJump(body_jump);
+        }
+        try self.statement();
+        try self.emitLoop(loop_start);
+        if (exit_jump) |offset| {
+            try self.patchJump(offset);
+            try self.emitOperation(.pop);
+        }
+        try self.endScope();
+    }
+
+    fn statement(self: *Self) anyerror!void {
         if (try self.match(.print)) {
             try self.printStatement();
+        } else if (try self.match(.@"if")) {
+            try self.ifStatement();
+        } else if (try self.match(.@"while")) {
+            try self.whileStatement();
+        } else if (try self.match(.@"for")) {
+            try self.forStatement();
         } else if (try self.match(.left_brace)) {
             self.beginScope();
             try self.block();
@@ -394,7 +536,7 @@ pub const Compiler = struct {
                 }
             }
         }
-        if (len == std.math.maxInt(u8) + 1) {
+        if (len == maxInt(u8) + 1) {
             return Error.TooManyLocals;
         }
         try self.locals.append(.{ .name = name, .depth = null });
