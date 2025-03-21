@@ -18,6 +18,7 @@ pub fn main() !void {
     const lox = Lox.init(
         arena.allocator(),
         Config{ .debug = .{
+            .writer = std.io.getStdErr().writer(),
             .print_code = getEnvFlag("DEBUG_PRINT_CODE"),
             .trace_execution = getEnvFlag("DEBUG_TRACE_EXECUTION"),
         } },
