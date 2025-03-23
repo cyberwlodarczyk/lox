@@ -7,13 +7,15 @@ const Operation = @import("chunk.zig").Operation;
 const Value = @import("value.zig").Value;
 const Compiler = @import("compiler.zig").Compiler;
 const Function = @import("value.zig").Function;
+const Upvalue = @import("value.zig").Upvalue;
+const Closure = @import("value.zig").Closure;
 const Native = @import("value.zig").Native;
 
 pub const VM = struct {
     const Self = @This();
     const Stack = ArrayList(Value);
     const CallFrame = struct {
-        function: Function,
+        closure: Closure,
         ptr: [*]const u8,
         slots: [*]Value,
     };
@@ -35,6 +37,7 @@ pub const VM = struct {
     stack: Stack,
     frames: CallFrames,
     current: *CallFrame,
+    open_upvalues: ?*Upvalue,
 
     pub fn init(allocator: Allocator, config: Config) !Self {
         return Self{
@@ -45,6 +48,7 @@ pub const VM = struct {
             .stack = try Stack.initCapacity(allocator, 256),
             .frames = CallFrames.init(allocator),
             .current = undefined,
+            .open_upvalues = null,
         };
     }
 
@@ -82,7 +86,7 @@ pub const VM = struct {
     }
 
     fn readConstant(self: *Self) Value {
-        return self.current.function.chunk.constants[self.read()];
+        return self.current.closure.function.chunk.constants[self.read()];
     }
 
     fn readOffset(self: *Self) u16 {
@@ -140,7 +144,12 @@ pub const VM = struct {
         ) });
     }
 
-    fn callReturn(self: *Self, result: Value, arg_count: u8) !void {
+    fn callNative(self: *Self, native: Native, arg_count: u8) !void {
+        if (arg_count != native.arity) {
+            return Error.BadArgCount;
+        }
+        const stack = self.stack.items;
+        const result = native.function(stack[stack.len - arg_count ..]);
         var i: u8 = 0;
         while (i <= arg_count) : (i += 1) {
             _ = self.pop();
@@ -148,23 +157,15 @@ pub const VM = struct {
         try self.push(result);
     }
 
-    fn callNative(self: *Self, native: Native, arg_count: u8) !void {
-        if (arg_count != native.arity) {
-            return Error.BadArgCount;
-        }
-        const stack = self.stack.items;
-        const result = native.function(stack[stack.len - arg_count ..]);
-        try self.callReturn(result, arg_count);
-    }
-
-    fn callFunction(self: *Self, function: Function, arg_count: u8) !void {
+    fn callClosure(self: *Self, closure: Closure, arg_count: u8) !void {
+        const function = closure.function;
         if (arg_count != function.arity) {
             return Error.BadArgCount;
         }
         const stack = self.stack.items;
         const frame = try self.frames.addOne();
         frame.* = .{
-            .function = function,
+            .closure = closure,
             .ptr = function.chunk.code.ptr,
             .slots = stack.ptr + stack.len - arg_count - 1,
         };
@@ -174,14 +175,54 @@ pub const VM = struct {
     fn call(self: *Self, callee: Value, arg_count: u8) !void {
         return switch (callee) {
             .native => |n| self.callNative(n, arg_count),
-            .function => |f| self.callFunction(f, arg_count),
+            .closure => |c| self.callClosure(c, arg_count),
             else => Error.NonCallable,
         };
     }
 
+    fn captureUpvalue(self: *Self, local: *Value) !*Upvalue {
+        var prev_upvalue: ?*Upvalue = null;
+        var upvalue = self.open_upvalues;
+        while (true) {
+            const u = upvalue orelse break;
+            if (@intFromPtr(u.location) <= @intFromPtr(local)) {
+                break;
+            }
+            prev_upvalue = u;
+            upvalue = u.next;
+        }
+        if (upvalue) |u| {
+            if (@intFromPtr(u.location) == @intFromPtr(local)) {
+                return u;
+            }
+        }
+        const created_upvalues = try self.allocator.alloc(Upvalue, 1);
+        const created_upvalue = &created_upvalues[0];
+        created_upvalue.location = local;
+        created_upvalue.next = upvalue;
+        if (prev_upvalue) |p| {
+            p.next = created_upvalue;
+        } else {
+            self.open_upvalues = created_upvalue;
+        }
+        return created_upvalue;
+    }
+
+    fn closeUpvalues(self: *Self, last: *Value) void {
+        while (true) {
+            const u = self.open_upvalues orelse break;
+            if (@intFromPtr(u.location) < @intFromPtr(last)) {
+                break;
+            }
+            u.closed = u.location.*;
+            u.location = &u.closed;
+            self.open_upvalues = u.next;
+        }
+    }
+
     fn debug(self: *Self) !void {
         const frame = self.current;
-        const chunk = frame.function.chunk;
+        const chunk = frame.closure.function.chunk;
         const writer = self.config.debug.writer;
         try writer.writeAll("        |");
         for (self.stack.items) |value| {
@@ -196,8 +237,9 @@ pub const VM = struct {
 
     pub fn run(self: *Self, script: Function) !void {
         try self.defineNative(.{ .arity = 0, .name = "now", .function = nowNative });
-        try self.push(Value{ .function = script });
-        try self.callFunction(script, 0);
+        const script_closure = Closure{ .function = script, .upvalues = &.{} };
+        try self.push(Value{ .closure = script_closure });
+        try self.callClosure(script_closure, 0);
         while (true) {
             if (self.config.debug.trace_execution) {
                 try self.debug();
@@ -223,6 +265,12 @@ pub const VM = struct {
                 },
                 .set_local => {
                     self.current.slots[self.read()] = self.peek(0);
+                },
+                .get_upvalue => {
+                    try self.push(self.current.closure.upvalues[self.read()].location.*);
+                },
+                .set_upvalue => {
+                    self.current.closure.upvalues[self.read()].location.* = self.peek(0);
                 },
                 .get_global => {
                     if (self.globals.get(self.readConstant().string)) |value| {
@@ -305,16 +353,37 @@ pub const VM = struct {
                     const arg_count = self.read();
                     try self.call(self.peek(arg_count), arg_count);
                 },
+                .closure => {
+                    const function = self.readConstant().function;
+                    const upvalues = try self.allocator.alloc(*Upvalue, function.upvalue_count);
+                    try self.push(.{ .closure = .{ .function = function, .upvalues = upvalues } });
+                    for (0..upvalues.len) |i| {
+                        const is_local = self.read();
+                        const index = self.read();
+                        if (is_local != 0) {
+                            upvalues[i] = try self.captureUpvalue(@as(*Value, @ptrCast(self.current.slots + index)));
+                        } else {
+                            upvalues[i] = self.current.closure.upvalues[index];
+                        }
+                    }
+                },
+                .close_upvalue => {
+                    self.closeUpvalues(@as(*Value, @ptrCast(&self.stack.items[self.stack.items.len - 1])));
+                    _ = self.pop();
+                },
                 .@"return" => {
                     const result = self.pop();
-                    const frame = self.frames.pop();
-                    const len = self.frames.items.len;
+                    self.closeUpvalues(@as(*Value, @ptrCast(self.current.slots)));
+                    _ = self.frames.pop();
+                    const frames = self.frames.items;
+                    const len = frames.len;
                     if (len == 0) {
                         _ = self.pop();
                         return;
                     }
-                    try self.callReturn(result, frame.function.arity);
-                    self.current = &self.frames.items[len - 1];
+                    self.stack.shrinkRetainingCapacity((@intFromPtr(self.current.slots) - @intFromPtr(self.stack.items.ptr)) / @sizeOf(Value));
+                    try self.push(result);
+                    self.current = &frames[len - 1];
                 },
             }
         }

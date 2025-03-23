@@ -11,7 +11,19 @@ pub const Native = struct {
 pub const Function = struct {
     arity: u8,
     name: ?[]const u8,
+    upvalue_count: u8,
     chunk: RawChunk,
+};
+
+pub const Closure = struct {
+    function: Function,
+    upvalues: []const *Upvalue,
+};
+
+pub const Upvalue = struct {
+    location: *Value,
+    closed: Value,
+    next: ?*Upvalue,
 };
 
 pub const Value = union(enum) {
@@ -23,7 +35,9 @@ pub const Value = union(enum) {
     number: f64,
     string: []const u8,
     function: Function,
+    closure: Closure,
     native: Native,
+    upvalue: *Upvalue,
 
     pub fn print(self: Self, writer: Writer) !void {
         switch (self) {
@@ -50,8 +64,15 @@ pub const Value = union(enum) {
                     try writer.writeAll("<script>");
                 }
             },
+            .closure => |c| {
+                try print(.{ .function = c.function }, writer);
+            },
             .native => |n| {
                 try writer.print("<native fn {s}>", .{n.name});
+            },
+            .upvalue => |u| {
+                try writer.writeAll("up ");
+                try u.location.print(writer);
             },
         }
     }
@@ -70,7 +91,7 @@ pub const Value = union(enum) {
             .number => |x| x == other.number,
             .string => |s| std.mem.eql(u8, s, other.string),
             .native => |n| std.mem.eql(u8, n.name, other.native.name) and n.function == other.native.function,
-            .function => false,
+            else => false,
         };
     }
 

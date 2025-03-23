@@ -51,12 +51,19 @@ pub const Compiler = struct {
     const Local = struct {
         name: Token,
         depth: ?u32,
+        is_captured: bool,
     };
     const Locals = ArrayList(Local);
+    const Upvalue = struct {
+        is_local: bool,
+        index: u8,
+    };
+    const Upvalues = ArrayList(Upvalue);
     const Node = struct {
         parent: ?*Node,
         chunk: Chunk,
         locals: Locals,
+        upvalues: Upvalues,
 
         fn init(allocator: Allocator, parent: ?*Node) !*Node {
             const nodes = try allocator.alloc(Node, 1);
@@ -64,6 +71,7 @@ pub const Compiler = struct {
             self.parent = parent;
             self.chunk = Chunk.init(allocator);
             self.locals = Locals.init(allocator);
+            self.upvalues = Upvalues.init(allocator);
             _ = try self.locals.addOne();
             return self;
         }
@@ -99,6 +107,7 @@ pub const Compiler = struct {
         TooManyLocals,
         TooManyParams,
         TooManyArgs,
+        TooManyUpvalues,
     };
 
     rules: ParseRules,
@@ -255,12 +264,15 @@ pub const Compiler = struct {
         }
         var i = len - 1;
         while (true) : (i -= 1) {
-            if (locals.items[i].depth.? > self.scope_depth) {
-                _ = locals.orderedRemove(i);
-            } else {
+            if (locals.items[i].depth.? <= self.scope_depth) {
                 break;
             }
-            try self.emitOperation(.pop);
+            if (locals.items[i].is_captured) {
+                try self.emitOperation(.close_upvalue);
+            } else {
+                try self.emitOperation(.pop);
+            }
+            _ = locals.orderedRemove(i);
             if (i == 0) {
                 break;
             }
@@ -292,7 +304,7 @@ pub const Compiler = struct {
     }
 
     fn addLocal(self: *Self, depth: ?u32) !void {
-        try self.node.locals.append(.{ .name = self.previous, .depth = depth });
+        try self.node.locals.append(.{ .name = self.previous, .depth = depth, .is_captured = false });
     }
 
     fn markLocal(self: *Self) void {
@@ -300,9 +312,10 @@ pub const Compiler = struct {
         locals[locals.len - 1].depth = self.scope_depth;
     }
 
-    fn resolveLocal(self: *Self) !?u8 {
+    fn resolveLocal(self: *Self, node: ?*Node) !?u8 {
+        const n = node orelse return null;
         const name = self.previous;
-        const locals = self.node.locals.items;
+        const locals = n.locals.items;
         const len = locals.len;
         if (len == 0) {
             return null;
@@ -319,6 +332,32 @@ pub const Compiler = struct {
             if (i == 0) {
                 break;
             }
+        }
+        return null;
+    }
+
+    fn addUpvalue(node: ?*Node, index: u8, is_local: bool) !?u8 {
+        const n = node orelse return null;
+        for (n.upvalues.items, 0..) |u, i| {
+            if (u.is_local == is_local and u.index == index) {
+                return @intCast(i);
+            }
+        }
+        if (n.upvalues.items.len == maxInt(u8)) {
+            return Error.TooManyUpvalues;
+        }
+        try n.upvalues.append(.{ .is_local = is_local, .index = index });
+        return @intCast(n.upvalues.items.len - 1);
+    }
+
+    fn resolveUpvalue(self: *Self, node: ?*Node) !?u8 {
+        const n = node orelse return null;
+        if (try self.resolveLocal(n.parent)) |i| {
+            n.parent.?.locals.items[i].is_captured = true;
+            return addUpvalue(n, i, true);
+        }
+        if (try self.resolveUpvalue(n.parent)) |i| {
+            return addUpvalue(n, i, false);
         }
         return null;
     }
@@ -531,13 +570,20 @@ pub const Compiler = struct {
         try self.consume(.left_brace, Error.ExpectedBlockLeftBrace);
         try self.block();
         try self.emitReturn();
-        const raw_chunk = RawChunk.init(self.node.chunk);
-        self.node = self.node.parent.?;
-        try self.emitConstant(.{ .function = .{
+        const node = self.node;
+        self.node = node.parent.?;
+        const raw_chunk = RawChunk.init(node.chunk);
+        const upvalue_count = node.upvalues.items.len;
+        try self.emitPair(.closure, try self.makeConstant(.{ .function = .{
             .arity = arity,
             .name = name,
+            .upvalue_count = @intCast(upvalue_count),
             .chunk = raw_chunk,
-        } });
+        } }));
+        for (node.upvalues.items) |u| {
+            try self.emit(if (u.is_local) 1 else 0);
+            try self.emit(u.index);
+        }
         if (self.config.debug.print_code) {
             try raw_chunk.debug(self.config.debug.writer, name);
         }
@@ -596,15 +642,27 @@ pub const Compiler = struct {
     }
 
     fn variable(self: *Self) !void {
-        const i = try self.resolveLocal();
-        const get: Operation = if (i) |_| .get_local else .get_global;
-        const set: Operation = if (i) |_| .set_local else .set_global;
-        const j = i orelse try self.makeGlobal();
+        var i: u8 = undefined;
+        var get: Operation = undefined;
+        var set: Operation = undefined;
+        if (try self.resolveLocal(self.node)) |j| {
+            i = j;
+            get = .get_local;
+            set = .set_local;
+        } else if (try self.resolveUpvalue(self.node)) |j| {
+            i = j;
+            get = .get_upvalue;
+            set = .set_upvalue;
+        } else {
+            i = try self.makeGlobal();
+            get = .get_global;
+            set = .set_global;
+        }
         if (self.can_assign and try self.match(.equal)) {
             try self.expression();
-            try self.emitPair(set, j);
+            try self.emitPair(set, i);
         } else {
-            try self.emitPair(get, j);
+            try self.emitPair(get, i);
         }
     }
 
@@ -682,6 +740,7 @@ pub const Compiler = struct {
             .arity = 0,
             .name = null,
             .chunk = raw_chunk,
+            .upvalue_count = 0,
         };
         if (self.config.debug.print_code) {
             try raw_chunk.debug(self.config.debug.writer, "<script>");

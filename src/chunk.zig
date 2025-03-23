@@ -13,6 +13,8 @@ pub const Operation = enum(u8) {
     pop,
     get_local,
     set_local,
+    get_upvalue,
+    set_upvalue,
     get_global,
     define_global,
     set_global,
@@ -30,6 +32,8 @@ pub const Operation = enum(u8) {
     jump_if_false,
     loop,
     call,
+    closure,
+    close_upvalue,
     @"return",
 };
 
@@ -58,15 +62,30 @@ pub const RawChunk = struct {
         const operation: Operation = @enumFromInt(self.code[offset]);
         const name = @tagName(operation);
         return switch (operation) {
-            .constant, .get_global, .define_global, .set_global => o: {
+            .constant, .closure, .get_global, .define_global, .set_global => o: {
                 const constant = self.code[offset + 1];
                 const value = self.constants[constant];
                 try writer.print("{s: <16} {d:>4} '", .{ name, constant });
                 try value.print(writer);
                 try writer.writeAll("'\n");
-                break :o offset + 2;
+                if (operation == .closure) {
+                    var x = offset + 2;
+                    for (0..value.function.upvalue_count) |_| {
+                        const is_local = self.code[x];
+                        x += 1;
+                        const index = self.code[x];
+                        x += 1;
+                        try writer.print(
+                            "{d:0>4}      |                     {s} {d}\n",
+                            .{ x - 2, if (is_local == 1) "local" else "upvalue", index },
+                        );
+                    }
+                    break :o x;
+                } else {
+                    break :o offset + 2;
+                }
             },
-            .get_local, .set_local, .call => o: {
+            .get_local, .set_local, .get_upvalue, .set_upvalue, .call => o: {
                 try writer.print("{s: <16} {d:>4}\n", .{ name, self.code[offset + 1] });
                 break :o offset + 2;
             },
