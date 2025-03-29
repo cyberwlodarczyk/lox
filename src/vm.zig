@@ -169,6 +169,9 @@ pub const VM = struct {
             .ptr = function.chunk.code.ptr,
             .slots = stack.ptr + stack.len - arg_count - 1,
         };
+        if (self.config.debug.trace_execution) {
+            frame.closure.function.chunk.debugStart();
+        }
         self.current = frame;
     }
 
@@ -220,9 +223,7 @@ pub const VM = struct {
         }
     }
 
-    fn debug(self: *Self) !void {
-        const frame = self.current;
-        const chunk = frame.closure.function.chunk;
+    fn debugStack(self: *Self) !void {
         const writer = self.config.debug.writer;
         try writer.writeAll("        |");
         for (self.stack.items) |value| {
@@ -231,8 +232,13 @@ pub const VM = struct {
             try writer.writeAll("]");
         }
         try writer.writeAll("\n");
-        const offset = @intFromPtr(frame.ptr) - @intFromPtr(chunk.code.ptr);
-        _ = try chunk.debugAt(writer, offset);
+    }
+
+    fn debug(self: *Self) !void {
+        const frame = self.current;
+        const chunk = &frame.closure.function.chunk;
+        try self.debugStack();
+        try chunk.debug();
     }
 
     pub fn run(self: *Self, script: Function) !void {

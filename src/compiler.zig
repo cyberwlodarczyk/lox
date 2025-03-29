@@ -65,11 +65,11 @@ pub const Compiler = struct {
         locals: Locals,
         upvalues: Upvalues,
 
-        fn init(allocator: Allocator, parent: ?*Node) !*Node {
+        fn init(allocator: Allocator, parent: ?*Node, start_line: u16) !*Node {
             const nodes = try allocator.alloc(Node, 1);
             const self = &nodes[0];
             self.parent = parent;
-            self.chunk = Chunk.init(allocator);
+            self.chunk = try Chunk.init(allocator, start_line);
             self.locals = Locals.init(allocator);
             self.upvalues = Upvalues.init(allocator);
             _ = try self.locals.addOne();
@@ -117,7 +117,7 @@ pub const Compiler = struct {
     current: Token,
     previous: Token,
     can_assign: bool,
-    scope_depth: u32,
+    scope_depth: u8,
     node: *Node,
 
     pub fn init(allocator: Allocator, config: Config, source: []const u8) !Self {
@@ -155,7 +155,7 @@ pub const Compiler = struct {
             .previous = undefined,
             .can_assign = false,
             .scope_depth = 0,
-            .node = try Node.init(allocator, null),
+            .node = try Node.init(allocator, null, 1),
         };
     }
 
@@ -549,7 +549,7 @@ pub const Compiler = struct {
 
     fn function(self: *Self) !void {
         self.beginScope();
-        self.node = try Node.init(self.allocator, self.node);
+        self.node = try Node.init(self.allocator, self.node, self.previous.line);
         var arity: u8 = 0;
         const name = try self.copy(self.previous.lexeme);
         try self.consume(.left_paren, Error.ExpectedFunLeftParen);
@@ -572,7 +572,8 @@ pub const Compiler = struct {
         try self.emitReturn();
         const node = self.node;
         self.node = node.parent.?;
-        const raw_chunk = RawChunk.init(node.chunk);
+        self.scope_depth = 0;
+        var raw_chunk = RawChunk.init(node.chunk, self.config.debug.writer);
         const upvalue_count = node.upvalues.items.len;
         try self.emitPair(.closure, try self.makeConstant(.{ .function = .{
             .arity = arity,
@@ -585,7 +586,7 @@ pub const Compiler = struct {
             try self.emit(u.index);
         }
         if (self.config.debug.print_code) {
-            try raw_chunk.debug(self.config.debug.writer, name);
+            try raw_chunk.debugAll(name);
         }
     }
 
@@ -735,7 +736,7 @@ pub const Compiler = struct {
             try self.declaration();
         }
         try self.emitReturn();
-        const raw_chunk = RawChunk.init(self.node.chunk);
+        var raw_chunk = RawChunk.init(self.node.chunk, self.config.debug.writer);
         const script = Function{
             .arity = 0,
             .name = null,
@@ -743,7 +744,7 @@ pub const Compiler = struct {
             .upvalue_count = 0,
         };
         if (self.config.debug.print_code) {
-            try raw_chunk.debug(self.config.debug.writer, "<script>");
+            try raw_chunk.debugAll("__script__");
         }
         return script;
     }

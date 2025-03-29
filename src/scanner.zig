@@ -47,7 +47,7 @@ pub const TokenKind = enum {
 pub const Token = struct {
     kind: TokenKind,
     lexeme: []const u8,
-    line: u32,
+    line: u16,
 };
 
 pub const Scanner = struct {
@@ -75,7 +75,7 @@ pub const Scanner = struct {
         .{ "while", .@"while" },
     });
 
-    line: u32,
+    line: u16,
     start: usize,
     current: usize,
     source: []const u8,

@@ -1,5 +1,6 @@
 const std = @import("std");
 const print = std.debug.print;
+const maxInt = std.math.maxInt;
 const ArrayList = std.ArrayList;
 const Writer = std.fs.File.Writer;
 const Allocator = std.mem.Allocator;
@@ -40,28 +41,59 @@ pub const Operation = enum(u8) {
 pub const RawChunk = struct {
     const Self = @This();
 
+    start_line: u16,
     code: []const u8,
     constants: []const Value,
-    lines: []const u32,
+    lines: []const u8,
+    debug_writer: Writer,
+    debug_state: struct {
+        offset: usize,
+        line: u16,
+        delta: u8,
+        is_next_line: bool,
+        is_end: bool,
+    },
 
-    pub fn init(chunk: Chunk) Self {
+    pub fn init(chunk: Chunk, debug_writer: Writer) Self {
         return Self{
+            .start_line = chunk.start_line,
+            .lines = chunk.lines.items,
             .code = chunk.code.items,
             .constants = chunk.constants.items,
-            .lines = chunk.lines.items,
+            .debug_writer = debug_writer,
+            .debug_state = undefined,
         };
     }
 
-    pub fn debugAt(self: Self, writer: Writer, offset: usize) !usize {
+    pub fn debugStart(self: *Self) void {
+        self.debug_state = .{
+            .offset = 0,
+            .line = 1,
+            .delta = 0,
+            .is_next_line = true,
+            .is_end = false,
+        };
+    }
+
+    pub fn debug(self: *Self) !void {
+        const state = &self.debug_state;
+        while (state.delta >= self.lines[state.line - 1]) {
+            state.delta -= self.lines[state.line - 1];
+            state.line += 1;
+            state.is_next_line = true;
+        }
+        const writer = self.debug_writer;
+        const offset = state.offset;
         try writer.print("{d:0>4} ", .{offset});
-        if (offset > 0 and self.lines[offset] == self.lines[offset - 1]) {
-            try writer.writeAll("   | ");
+        if (state.is_next_line) {
+            state.is_next_line = false;
+            try writer.print("{d: >4} ", .{self.start_line + state.line - 1});
         } else {
-            try writer.print("{d: >4} ", .{self.lines[offset]});
+            try writer.writeAll("   | ");
         }
         const operation: Operation = @enumFromInt(self.code[offset]);
         const name = @tagName(operation);
-        return switch (operation) {
+        const delta: u8 = switch (operation) {
             .constant, .closure, .get_global, .define_global, .set_global => o: {
                 const constant = self.code[offset + 1];
                 const value = self.constants[constant];
@@ -80,14 +112,14 @@ pub const RawChunk = struct {
                             .{ x - 2, if (is_local == 1) "local" else "upvalue", index },
                         );
                     }
-                    break :o x;
+                    break :o 2 + value.function.upvalue_count * 2;
                 } else {
-                    break :o offset + 2;
+                    break :o 2;
                 }
             },
             .get_local, .set_local, .get_upvalue, .set_upvalue, .call => o: {
                 try writer.print("{s: <16} {d:>4}\n", .{ name, self.code[offset + 1] });
-                break :o offset + 2;
+                break :o 2;
             },
             .jump, .jump_if_false, .loop => o: {
                 var jump = @as(u16, @intCast(self.code[offset + 1])) << 8;
@@ -99,20 +131,26 @@ pub const RawChunk = struct {
                     dest += jump;
                 }
                 try writer.print("{s: <16} {d:>4} -> {d}\n", .{ name, offset, dest });
-                break :o offset + 3;
+                break :o 3;
             },
             else => o: {
                 try writer.print("{s}\n", .{name});
-                break :o offset + 1;
+                break :o 1;
             },
         };
+        state.offset += delta;
+        if (state.offset == self.code.len) {
+            state.is_end = true;
+            return;
+        }
+        state.delta += delta;
     }
 
-    pub fn debug(self: Self, writer: Writer, name: []const u8) !void {
-        try writer.print("== {s} ==\n", .{name});
-        var offset: usize = 0;
-        while (offset < self.code.len) {
-            offset = try self.debugAt(writer, offset);
+    pub fn debugAll(self: *Self, label: []const u8) !void {
+        try self.debug_writer.print("== {s} ==\n", .{label});
+        self.debugStart();
+        while (!self.debug_state.is_end) {
+            try self.debug();
         }
     }
 };
@@ -120,20 +158,28 @@ pub const RawChunk = struct {
 pub const Chunk = struct {
     const Self = @This();
 
+    start_line: u16,
+    lines: ArrayList(u8),
     code: ArrayList(u8),
     constants: ArrayList(Value),
-    lines: ArrayList(u32),
 
-    pub fn init(allocator: Allocator) Self {
-        return Chunk{
+    pub fn init(allocator: Allocator, start_line: u16) !Self {
+        var self = Self{
+            .start_line = start_line,
+            .lines = ArrayList(u8).init(allocator),
             .code = ArrayList(u8).init(allocator),
             .constants = ArrayList(Value).init(allocator),
-            .lines = ArrayList(u32).init(allocator),
         };
+        try self.lines.append(0);
+        return self;
     }
 
-    pub fn write(self: *Self, byte: u8, line: u32) !void {
+    pub fn write(self: *Self, byte: u8, line: u16) !void {
+        const current_line = self.start_line + @as(u16, @intCast(self.lines.items.len)) - 1;
+        for (0..line - current_line) |_| {
+            try self.lines.append(0);
+        }
+        self.lines.items[self.lines.items.len - 1] += 1;
         try self.code.append(byte);
-        try self.lines.append(line);
     }
 };
