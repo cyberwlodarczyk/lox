@@ -50,7 +50,7 @@ pub const Compiler = struct {
     const ParseRules = EnumArray(TokenKind, ParseRule);
     const Local = struct {
         name: Token,
-        depth: ?u32,
+        depth: ?u8,
         is_captured: bool,
     };
     const Locals = ArrayList(Local);
@@ -72,7 +72,8 @@ pub const Compiler = struct {
             self.chunk = try Chunk.init(allocator, start_line);
             self.locals = Locals.init(allocator);
             self.upvalues = Upvalues.init(allocator);
-            _ = try self.locals.addOne();
+            const placeholder = try self.locals.addOne();
+            placeholder.depth = 0;
             return self;
         }
     };
@@ -303,7 +304,7 @@ pub const Compiler = struct {
         }
     }
 
-    fn addLocal(self: *Self, depth: ?u32) !void {
+    fn addLocal(self: *Self, depth: ?u8) !void {
         try self.node.locals.append(.{ .name = self.previous, .depth = depth, .is_captured = false });
     }
 
